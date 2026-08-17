@@ -115,6 +115,7 @@ def create_tbank_payment(amount, description, user_id):
         if data.get("Success"):
             return data["PaymentURL"], data["PaymentId"]
         else:
+            print(f"❌ Т-Банк ответил: {data}")
             return None, None
     except Exception as e:
         print(f"❌ Ошибка Т-Банка: {e}")
@@ -144,6 +145,15 @@ def check_subscription(user_id):
     now = int(time.time())
     days_left = max(0, (expires_at - now) // 86400)
     return now < expires_at, plan, expires_at, days_left
+
+async def ensure_subscription(callback: types.CallbackQuery):
+    """Проверяет подписку и при необходимости выдаёт пробный доступ."""
+    user_id = callback.from_user.id
+    active, plan, expires, days_left = check_subscription(user_id)
+    if not active:
+        update_subscription(user_id, "trial", 1)
+        await callback.message.answer("✅ Тебе активирован пробный доступ на 24 часа. Теперь ты можешь пользоваться всеми функциями бота!")
+    return active
 
 # =======================================================
 # 15 MINDFULNESS-ПРАКТИК
@@ -198,19 +208,6 @@ def subscription_keyboard():
     builder.button(text="⬅ Назад", callback_data="main_menu")
     builder.adjust(1)
     return builder.as_markup()
-
-# =======================================================
-# ДЕКОРАТОР ПРОВЕРКИ ПОДПИСКИ (ИСПРАВЛЕН)
-# =======================================================
-def subscription_required(func):
-    async def wrapper(callback: types.CallbackQuery, **kwargs):
-        user_id = callback.from_user.id
-        active, plan, expires, days_left = check_subscription(user_id)
-        if not active:
-            update_subscription(user_id, "trial", 1)
-            await callback.message.answer("✅ Тебе активирован пробный доступ на 24 часа. Теперь ты можешь пользоваться всеми функциями бота!")
-        return await func(callback, **kwargs)
-    return wrapper
 
 # =======================================================
 # ОБРАБОТЧИКИ
@@ -309,8 +306,8 @@ async def process_subscription(callback: types.CallbackQuery):
 # ДНЕВНИК ЭМОЦИЙ
 # =======================================================
 @dp.callback_query(lambda c: c.data == "diary")
-@subscription_required
 async def diary_start(callback: types.CallbackQuery, state: FSMContext):
+    await ensure_subscription(callback)
     await callback.message.answer("📓 Как ты себя чувствуешь сегодня? (напиши одним словом или эмодзи)")
     await state.set_state(DiaryStates.waiting_for_emotion)
     await callback.answer()
@@ -345,8 +342,8 @@ async def diary_get_reason(message: types.Message, state: FSMContext):
 # ПРАКТИКА ОСОЗНАННОСТИ + НАПОМИНАНИЯ
 # =======================================================
 @dp.callback_query(lambda c: c.data == "mindfulness_menu")
-@subscription_required
-async def mindfulness_menu(callback: types.CallbackQuery, state: FSMContext):
+async def mindfulness_menu(callback: types.CallbackQuery):
+    await ensure_subscription(callback)
     await callback.message.answer(
         "🧘 Mindfulness — практика осознанности\n\n"
         "Это способ мягко вернуться в настоящий момент, услышать своё тело и успокоить ум.\n\n"
@@ -361,8 +358,8 @@ async def mindfulness_menu(callback: types.CallbackQuery, state: FSMContext):
     await callback.answer()
 
 @dp.callback_query(lambda c: c.data == "mindfulness_about")
-@subscription_required
 async def mindfulness_about(callback: types.CallbackQuery):
+    await ensure_subscription(callback)
     await callback.message.answer(
         "📖 Что такое Mindfulness (осознанность)?\n\n"
         "Осознанность — это умение быть здесь и сейчас, без осуждения и оценок.\n\n"
@@ -381,8 +378,8 @@ async def mindfulness_about(callback: types.CallbackQuery):
     await callback.answer()
 
 @dp.callback_query(lambda c: c.data == "mindfulness_today")
-@subscription_required
 async def mindfulness_today(callback: types.CallbackQuery, state: FSMContext):
+    await ensure_subscription(callback)
     practice = random.choice(MINDFULNESS_PRACTICES)
     practice_id = MINDFULNESS_PRACTICES.index(practice)
     await state.update_data(practice_id=practice_id)
@@ -431,8 +428,8 @@ async def mindfulness_feedback(message: types.Message, state: FSMContext):
 # НАСТРОЙКА НАПОМИНАНИЙ
 # =======================================================
 @dp.callback_query(lambda c: c.data == "reminder_settings")
-@subscription_required
 async def reminder_settings(callback: types.CallbackQuery, state: FSMContext):
+    await ensure_subscription(callback)
     await callback.message.answer(
         "⏰ Настрой время, когда тебе удобно получать напоминание о mindfulness-практике.\n\n"
         "Введи время в формате ЧЧ:ММ (например, 09:30 или 21:00).\n\n"
@@ -462,8 +459,8 @@ async def process_reminder_time(message: types.Message, state: FSMContext):
     await message.answer("Главное меню:", reply_markup=main_menu_keyboard())
 
 @dp.callback_query(lambda c: c.data == "reminder_off")
-@subscription_required
-async def reminder_off(callback: types.CallbackQuery, state: FSMContext):
+async def reminder_off(callback: types.CallbackQuery):
+    await ensure_subscription(callback)
     user_id = callback.from_user.id
     conn = sqlite3.connect(DB_PATH)
     c = conn.cursor()
@@ -478,8 +475,8 @@ async def reminder_off(callback: types.CallbackQuery, state: FSMContext):
 # МОЙ ПРОГРЕСС (глубокая статистика)
 # =======================================================
 @dp.callback_query(lambda c: c.data == "my_progress")
-@subscription_required
 async def my_progress(callback: types.CallbackQuery):
+    await ensure_subscription(callback)
     user_id = callback.from_user.id
     conn = sqlite3.connect(DB_PATH)
     c = conn.cursor()
