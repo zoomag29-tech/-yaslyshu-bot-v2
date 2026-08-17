@@ -13,6 +13,7 @@ from openai import OpenAI
 import httpx
 from pydub import AudioSegment
 from io import BytesIO
+import hashlib
 
 # =======================================================
 # КОНФИГУРАЦИЯ (секреты из переменных окружения)
@@ -153,11 +154,19 @@ async def send_voice_practice(chat_id: int, speech_bytes: BytesIO):
 
 def create_tbank_payment(amount, description, user_id):
     url = "https://securepay.tinkoff.ru/v2/Init"
+    amount_kop = amount * 100
+    order_id = f"order_{user_id}_{int(time.time())}"
+    
+    # Формируем подпись Token
+    token_str = f"{TERMINAL_KEY}{order_id}{amount_kop}{description}{TERMINAL_PASSWORD}"
+    token = hashlib.sha256(token_str.encode()).hexdigest()
+    
     payload = {
         "TerminalKey": TERMINAL_KEY,
-        "Amount": amount * 100,
-        "OrderId": f"order_{user_id}_{int(time.time())}",
+        "Amount": amount_kop,
+        "OrderId": order_id,
         "Description": description,
+        "Token": token,
         "NotificationURL": "https://yaslyshu-bot-v2.onrender.com/payment_webhook",
         "SuccessURL": "https://t.me/yaslyshu_bot",
         "FailURL": "https://t.me/yaslyshu_bot"
@@ -167,13 +176,15 @@ def create_tbank_payment(amount, description, user_id):
         response.raise_for_status()
         data = response.json()
         if data.get("Success"):
-            return data["PaymentURL"], data["PaymentId"]
+            return data["PaymentURL"], data["PaymentId"], None
         else:
+            error_text = f"Т-Банк: {data.get('ErrorCode', '')} {data.get('Message', '')} {data.get('Details', '')}"
             print(f"❌ Т-Банк ответил: {data}")
-            return None, None
+            return None, None, error_text
     except Exception as e:
+        error_text = f"Ошибка запроса: {e}"
         print(f"❌ Ошибка Т-Банка: {e}")
-        return None, None
+        return None, None, error_text
 
 def get_user_subscription(user_id):
     conn = sqlite3.connect(DB_PATH)
@@ -345,15 +356,15 @@ async def process_subscription(callback: types.CallbackQuery):
         await callback.answer()
         return
 
-    pay_url, payment_id = create_tbank_payment(price, desc, callback.from_user.id)
-    if not pay_url:
-        await callback.message.answer("❌ Не удалось создать платёжную ссылку. Попробуй позже.")
-        await callback.answer()
-        return
-
-    await callback.message.answer(
-        f"💳 Для оплаты перейди по ссылке:\n\n{pay_url}\n\nПосле оплаты подписка активируется автоматически."
-    )
+    pay_url, payment_id, error_text = create_tbank_payment(price, desc, callback.from_user.id)
+    if pay_url is None:
+        await callback.message.answer("❌ Не удалось создать платёжную ссылку.")
+        if error_text:
+            await callback.message.answer(f"ℹ️ {error_text}")
+    else:
+        await callback.message.answer(
+            f"💳 Для оплаты перейди по ссылке:\n\n{pay_url}\n\nПосле оплаты подписка активируется автоматически."
+        )
     await callback.answer()
 
 # =======================================================
