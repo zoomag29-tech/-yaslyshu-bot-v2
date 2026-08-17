@@ -104,7 +104,7 @@ def create_tbank_payment(amount, description, user_id):
         "Amount": amount * 100,
         "OrderId": f"order_{user_id}_{int(time.time())}",
         "Description": description,
-        "NotificationURL": "https://yaslyshu-bot.onrender.com/payment_webhook",
+        "NotificationURL": "https://yaslyshu-bot-v2.onrender.com/payment_webhook",
         "SuccessURL": "https://t.me/yaslyshu_bot",
         "FailURL": "https://t.me/yaslyshu_bot"
     }
@@ -200,16 +200,16 @@ def subscription_keyboard():
     return builder.as_markup()
 
 # =======================================================
-# ДЕКОРАТОР ПРОВЕРКИ ПОДПИСКИ
+# ДЕКОРАТОР ПРОВЕРКИ ПОДПИСКИ (ИСПРАВЛЕН)
 # =======================================================
 def subscription_required(func):
-    async def wrapper(callback: types.CallbackQuery, state: FSMContext = None, **kwargs):
+    async def wrapper(callback: types.CallbackQuery, **kwargs):
         user_id = callback.from_user.id
         active, plan, expires, days_left = check_subscription(user_id)
         if not active:
             update_subscription(user_id, "trial", 1)
             await callback.message.answer("✅ Тебе активирован пробный доступ на 24 часа. Теперь ты можешь пользоваться всеми функциями бота!")
-        return await func(callback, state, **kwargs)
+        return await func(callback, **kwargs)
     return wrapper
 
 # =======================================================
