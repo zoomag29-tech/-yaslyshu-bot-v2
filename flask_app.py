@@ -13,7 +13,7 @@ from openai import OpenAI
 import httpx
 from pydub import AudioSegment
 from io import BytesIO
-import hashlib
+import base64
 
 # =======================================================
 # КОНФИГУРАЦИЯ (секреты из переменных окружения)
@@ -157,22 +157,24 @@ def create_tbank_payment(amount, description, user_id):
     amount_kop = amount * 100
     order_id = f"order_{user_id}_{int(time.time())}"
     
-    # Формируем подпись Token
-    token_str = f"{TERMINAL_KEY}{order_id}{amount_kop}{description}{TERMINAL_PASSWORD}"
-    token = hashlib.sha256(token_str.encode()).hexdigest()
+    # Basic Auth
+    auth_str = base64.b64encode(f"{TERMINAL_KEY}:{TERMINAL_PASSWORD}".encode()).decode()
+    headers = {
+        "Authorization": f"Basic {auth_str}",
+        "Content-Type": "application/json"
+    }
     
     payload = {
         "TerminalKey": TERMINAL_KEY,
         "Amount": amount_kop,
         "OrderId": order_id,
         "Description": description,
-        "Token": token,
         "NotificationURL": "https://yaslyshu-bot-v2.onrender.com/payment_webhook",
         "SuccessURL": "https://t.me/yaslyshu_bot",
         "FailURL": "https://t.me/yaslyshu_bot"
     }
     try:
-        response = requests.post(url, json=payload, timeout=10, verify=False)
+        response = requests.post(url, json=payload, headers=headers, timeout=10, verify=False)
         response.raise_for_status()
         data = response.json()
         if data.get("Success"):
