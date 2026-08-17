@@ -131,7 +131,6 @@ def mix_audio(speech: BytesIO, music_path: str = "background_music.mp3", music_v
         music_audio = AudioSegment.from_file(music_path)
         # Обрезаем или зацикливаем музыку до длины речи
         if len(music_audio) < len(speech_audio):
-            # Зацикливаем
             loops = len(speech_audio) // len(music_audio) + 1
             music_audio = (music_audio * loops)[:len(speech_audio)]
         else:
@@ -448,8 +447,8 @@ async def mindfulness_today(callback: types.CallbackQuery, state: FSMContext):
     await callback.message.answer("🧘 Готовлю для тебя практику... Дай мне секунду.")
     answer = call_deepseek(prompt)
 
-    # Попытка синтеза аудио
     audio_sent = False
+    error_message = ""
     try:
         if YANDEX_API_KEY and YANDEX_FOLDER_ID:
             speech_bytes = synthesize_speech(answer, voice="lera", speed=0.9)
@@ -457,13 +456,14 @@ async def mindfulness_today(callback: types.CallbackQuery, state: FSMContext):
             await send_voice_practice(callback.from_user.id, mixed_bytes)
             audio_sent = True
         else:
-            print("⚠️ Не заданы YANDEX_API_KEY или YANDEX_FOLDER_ID, отправляю текст")
+            error_message = "Нет ключей Яндекс"
     except Exception as e:
-        print(f"❌ Ошибка синтеза аудио: {e}")
+        error_message = str(e)
 
-    # Если аудио не отправлено, отправляем текст
     if not audio_sent:
         await callback.message.answer(answer)
+        if error_message:
+            await callback.message.answer(f"⚠️ Ошибка аудио: {error_message}")
 
     await callback.message.answer("Как ты себя чувствуешь после этого? (напиши коротко)")
     await state.set_state(MindfulnessStates.waiting_for_feedback)
