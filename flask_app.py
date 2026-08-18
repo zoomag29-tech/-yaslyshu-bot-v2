@@ -103,7 +103,7 @@ def call_deepseek(prompt: str) -> str:
         print(f"❌ DeepSeek error: {e}")
         return "Извините, сейчас сервис временно недоступен. Попробуйте позже."
 
-def synthesize_speech(text: str, voice: str = "lera", speed: float = 0.9) -> BytesIO:
+def synthesize_speech(text: str, voice: str = "alena", speed: float = 0.9) -> BytesIO:
     """Синтез речи через Яндекс SpeechKit. Возвращает BytesIO с аудио в mp3."""
     if not YANDEX_API_KEY or not YANDEX_FOLDER_ID:
         raise RuntimeError("Не заданы YANDEX_API_KEY или YANDEX_FOLDER_ID")
@@ -471,7 +471,7 @@ async def mindfulness_today(callback: types.CallbackQuery, state: FSMContext):
     error_message = ""
     try:
         if YANDEX_API_KEY and YANDEX_FOLDER_ID:
-            speech_bytes = synthesize_speech(answer, voice="lera", speed=0.9)
+            speech_bytes = synthesize_speech(answer, voice="alena", speed=0.9)
             mixed_bytes = mix_audio(speech_bytes, music_path="background_music.mp3", music_volume=-20)
             await send_voice_practice(callback.from_user.id, mixed_bytes)
             audio_sent = True
