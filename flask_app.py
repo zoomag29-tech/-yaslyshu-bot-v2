@@ -42,7 +42,7 @@ DB_PATH = 'yaslyshu.db'
 def init_db():
     conn = sqlite3.connect(DB_PATH)
     c = conn.cursor()
-    # Создаём таблицу пользователей
+    # Таблица пользователей
     c.execute('''CREATE TABLE IF NOT EXISTS users
                  (user_id INTEGER PRIMARY KEY, 
                   subscription_plan TEXT, 
@@ -63,6 +63,15 @@ def init_db():
                 c.execute("ALTER TABLE users ADD COLUMN created_at INTEGER")
         except sqlite3.OperationalError:
             pass
+    # Таблица платежей
+    c.execute('''CREATE TABLE IF NOT EXISTS payments
+                 (order_id TEXT PRIMARY KEY,
+                  user_id INTEGER,
+                  plan TEXT,
+                  duration_days INTEGER,
+                  amount INTEGER,
+                  created_at INTEGER,
+                  status TEXT DEFAULT 'pending')''')
     c.execute('''CREATE TABLE IF NOT EXISTS diary_entries
                  (user_id INTEGER, date TEXT, emotion TEXT, reason TEXT)''')
     c.execute('''CREATE TABLE IF NOT EXISTS mindfulness_log
@@ -143,7 +152,7 @@ def set_user_gender(user_id, gender):
     conn.commit()
     conn.close()
 
-def create_tbank_payment(amount, description, user_id):
+def create_tbank_payment(amount, description, user_id, plan, duration_days):
     # Выбираем URL в зависимости от тестового ключа
     if "DEMO" in TERMINAL_KEY:
         url = "https://rest-api-test.tinkoff.ru/v2/Init"
@@ -195,6 +204,8 @@ def create_tbank_payment(amount, description, user_id):
         response.raise_for_status()
         data = response.json()
         if data.get("Success"):
+            # Сохраняем информацию о платеже
+            save_payment(order_id, user_id, plan, duration_days, amount_kop)
             return data["PaymentURL"], data["PaymentId"], None
         else:
             error_text = f"Т-Банк: {data.get('ErrorCode', '')} {data.get('Message', '')} {data.get('Details', '')}"
@@ -205,6 +216,29 @@ def create_tbank_payment(amount, description, user_id):
         error_text = f"Ошибка запроса: {e}"
         print(f"❌ Ошибка Т-Банка: {e}")
         return None, None, error_text
+
+def save_payment(order_id, user_id, plan, duration_days, amount):
+    conn = sqlite3.connect(DB_PATH)
+    c = conn.cursor()
+    c.execute("INSERT OR REPLACE INTO payments (order_id, user_id, plan, duration_days, amount, created_at, status) VALUES (?, ?, ?, ?, ?, ?, 'pending')",
+              (order_id, user_id, plan, duration_days, amount, int(time.time())))
+    conn.commit()
+    conn.close()
+
+def get_payment(order_id):
+    conn = sqlite3.connect(DB_PATH)
+    c = conn.cursor()
+    c.execute("SELECT user_id, plan, duration_days, status FROM payments WHERE order_id = ?", (order_id,))
+    row = c.fetchone()
+    conn.close()
+    return row
+
+def update_payment_status(order_id, status):
+    conn = sqlite3.connect(DB_PATH)
+    c = conn.cursor()
+    c.execute("UPDATE payments SET status = ? WHERE order_id = ?", (status, order_id))
+    conn.commit()
+    conn.close()
 
 def get_user_subscription(user_id):
     conn = sqlite3.connect(DB_PATH)
@@ -337,7 +371,6 @@ async def start(message: types.Message, state: FSMContext):
         await message.answer("👋 Привет, Маргарита! Ты администратор, тебе доступны все функции без ограничений.")
         await message.answer("Главное меню:", reply_markup=main_menu_keyboard())
         return
-    # Проверяем, указан ли пол
     gender = get_user_gender(user_id)
     if gender is None:
         await message.answer("🌸 Привет! Добро пожаловать в «я слышу».\n\nЧтобы я могла обращаться к тебе правильно, скажи: ты девушка или парень?", reply_markup=gender_keyboard())
@@ -356,8 +389,7 @@ async def process_gender(callback: types.CallbackQuery, state: FSMContext):
     user_id = callback.from_user.id
     set_user_gender(user_id, gender)
     await state.clear()
-    pronoun = "девушка" if gender == "female" else "парень"
-    await callback.message.answer(f"Спасибо! Теперь я буду обращаться к тебе правильно 😊")
+    await callback.message.answer("Спасибо! Теперь я буду обращаться к тебе правильно 😊")
     active, plan, expires, days_left = check_subscription(user_id)
     if active:
         text = f"👋 Ты уже с нами.\nТвой тариф: {plan}\nОсталось дней: {days_left}"
@@ -366,7 +398,6 @@ async def process_gender(callback: types.CallbackQuery, state: FSMContext):
     await callback.message.answer(text, reply_markup=main_menu_keyboard())
     await callback.answer()
 
-# Команда /stats (только для админа)
 @dp.message(Command("stats"))
 async def stats(message: types.Message):
     if message.from_user.id != ADMIN_ID:
@@ -389,6 +420,8 @@ async def stats(message: types.Message):
     seven_days_ago = int(time.time()) - 7 * 86400
     c.execute("SELECT COUNT(*) FROM users WHERE created_at >= ?", (seven_days_ago,))
     new_users_7d = c.fetchone()[0]
+    c.execute("SELECT COUNT(*) FROM payments WHERE status = 'paid'")
+    paid_count = c.fetchone()[0]
     conn.close()
     
     text = f"📊 Статистика бота «я слышу»\n\n" \
@@ -396,6 +429,7 @@ async def stats(message: types.Message):
            f"🆕 Новых за 7 дней: {new_users_7d}\n" \
            f"✅ Активные подписки: {active_paid}\n" \
            f"🕐 Активные триалы: {active_trials}\n" \
+           f"💰 Успешных платежей: {paid_count}\n" \
            f"📓 Записей в дневнике: {diary_entries}\n" \
            f"🧘 Выполнено практик: {mindfulness_logs}\n" \
            f"⏰ Включены напоминания: {reminders_on}"
@@ -455,7 +489,21 @@ async def cancel_command(message: types.Message, state: FSMContext):
 
 @dp.callback_query(lambda c: c.data == "subscribe_menu")
 async def subscribe_menu(callback: types.CallbackQuery):
-    await callback.message.answer("📅 Выбери тариф:", reply_markup=subscription_keyboard())
+    user_id = callback.from_user.id
+    if user_id == ADMIN_ID:
+        await callback.message.answer("Ты администратор, подписка не требуется. Вот тарифы для ознакомления:", reply_markup=subscription_keyboard())
+        await callback.answer()
+        return
+    active, plan, expires, days_left = check_subscription(user_id)
+    if active:
+        if plan == 'trial':
+            text = f"🕐 Пробный период активен.\nОсталось дней: {days_left}\n\nОформи подписку, чтобы продолжить пользоваться всеми функциями."
+        else:
+            end_date = datetime.fromtimestamp(expires).strftime("%d.%m.%Y")
+            text = f"💎 Твоя подписка:\nТариф: {plan}\nДействует до: {end_date}\nОсталось дней: {days_left}\n\nХочешь продлить или изменить тариф?"
+    else:
+        text = "💎 У тебя нет активной подписки.\nВыбери тариф:"
+    await callback.message.answer(text, reply_markup=subscription_keyboard())
     await callback.answer()
 
 @dp.callback_query(lambda c: c.data == "main_menu")
@@ -468,19 +516,22 @@ async def process_subscription(callback: types.CallbackQuery):
     plan = callback.data.split("_")[1]
     if plan == "week":
         price = 80
+        duration_days = 7
         desc = "Подписка я слышу (Неделя)"
     elif plan == "month":
         price = 180
+        duration_days = 30
         desc = "Подписка я слышу (Месяц)"
     elif plan == "year":
         price = 1800
+        duration_days = 365
         desc = "Подписка я слышу (Год)"
     else:
         await callback.message.answer("❌ Неизвестный тариф.")
         await callback.answer()
         return
 
-    pay_url, payment_id, error_text = create_tbank_payment(price, desc, callback.from_user.id)
+    pay_url, payment_id, error_text = create_tbank_payment(price, desc, callback.from_user.id, plan, duration_days)
     if pay_url is None:
         await callback.message.answer("❌ Не удалось создать платёжную ссылку.")
         if error_text:
@@ -702,6 +753,14 @@ async def my_progress(callback: types.CallbackQuery):
     else:
         reminder_status = "🔕 Напоминания отключены"
     
+    # Информация о подписке
+    active, plan, expires, days_left = check_subscription(user_id)
+    if active:
+        end_date = datetime.fromtimestamp(expires).strftime("%d.%m.%Y")
+        sub_info = f"💎 Подписка: {plan} (до {end_date}, осталось {days_left} дн.)"
+    else:
+        sub_info = "💎 Подписка: неактивна"
+
     conn.close()
 
     if diary_count == 0:
@@ -724,7 +783,8 @@ async def my_progress(callback: types.CallbackQuery):
             f"🔥 Чаще всего за последнюю неделю ты чувствовал(а): {top_emotion}\n"
             f"💡 Это говорит о том, что твоё внимание сейчас направлено на эту область. Это ценный сигнал.\n\n"
             f"📝 Последние записи из дневника:\n{entries_list}\n"
-            f"🔄 {reminder_status}\n\n"
+            f"🔄 {reminder_status}\n"
+            f"{sub_info}\n\n"
             f"Ты проделываешь большую работу. Каждый шаг — это шаг к себе. 🌿"
         )
 
@@ -758,12 +818,20 @@ def tbank_webhook():
     print(f"🔔 Получен вебхук от Т-Банка: {data}")
     if data.get("Status") == "CONFIRMED" or data.get("Success") == True:
         order_id = data.get("OrderId", "")
-        try:
-            user_id = int(order_id.split("_")[1])
-            update_subscription(user_id, "month", 30)
-            print(f"✅ Подписка активирована для пользователя {user_id}")
-        except Exception as e:
-            print(f"❌ Ошибка при активации подписки: {e}")
+        payment = get_payment(order_id)
+        if payment and payment[3] != 'paid':
+            user_id, plan, duration_days, status = payment
+            update_subscription(user_id, plan, duration_days)
+            update_payment_status(order_id, 'paid')
+            end_time = int(time.time()) + duration_days * 86400
+            end_date = datetime.fromtimestamp(end_time).strftime("%d.%m.%Y")
+            message_text = f"✅ Оплата прошла! Твой тариф «{plan}» активен до {end_date}."
+            try:
+                get_event_loop().run_until_complete(bot.send_message(user_id, message_text))
+            except Exception as e:
+                print(f"❌ Ошибка отправки подтверждения: {e}")
+        else:
+            print(f"ℹ️ Заказ {order_id} не найден или уже обработан.")
     return "OK", 200
 
 @app.post("/webhook")
