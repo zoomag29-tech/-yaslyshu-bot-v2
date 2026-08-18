@@ -17,12 +17,13 @@ import hashlib
 # КОНФИГУРАЦИЯ (секреты из переменных окружения)
 # =======================================================
 BOT_TOKEN = os.environ.get("BOT_TOKEN")
-ADMIN_ID = int(os.environ.get("ADMIN_ID", "8025021798"))
+ADMIN_ID = int(os.environ.get("ADMIN_ID", "726250140"))
 DEEPSEEK_API_KEY = os.environ.get("DEEPSEEK_API_KEY")
 CONTACT = "@MARGOKARDATOVA"
 
 TERMINAL_KEY = os.environ.get("TERMINAL_KEY")
 TERMINAL_PASSWORD = os.environ.get("TERMINAL_PASSWORD")
+RECEIPT_EMAIL = os.environ.get("RECEIPT_EMAIL", "no-reply@example.com")
 
 if not BOT_TOKEN or not DEEPSEEK_API_KEY or not TERMINAL_KEY or not TERMINAL_PASSWORD:
     raise RuntimeError("Не заданы обязательные переменные окружения: BOT_TOKEN, DEEPSEEK_API_KEY, TERMINAL_KEY, TERMINAL_PASSWORD")
@@ -46,7 +47,13 @@ def init_db():
                   subscription_plan TEXT, 
                   expires_at INTEGER,
                   reminder_time TEXT DEFAULT '09:30',
-                  reminder_enabled INTEGER DEFAULT 1)''')
+                  reminder_enabled INTEGER DEFAULT 1,
+                  trial_used INTEGER DEFAULT 0)''')
+    # Добавляем колонку trial_used, если её нет (для существующих БД)
+    try:
+        c.execute("ALTER TABLE users ADD COLUMN trial_used INTEGER DEFAULT 0")
+    except sqlite3.OperationalError:
+        pass  # колонка уже есть
     c.execute('''CREATE TABLE IF NOT EXISTS diary_entries
                  (user_id INTEGER, date TEXT, emotion TEXT, reason TEXT)''')
     c.execute('''CREATE TABLE IF NOT EXISTS mindfulness_log
@@ -130,12 +137,10 @@ def create_tbank_payment(amount, description, user_id):
     token = hashlib.sha256(token_str.encode('utf-8')).hexdigest()
     payload["Token"] = token
 
-    # Добавляем Receipt (кассовый чек) после генерации токена.
-    # Внимание: параметры Taxation и Tax могут отличаться.
-    # Если у вас другая система налогообложения, измените значения ниже.
+    # Добавляем Receipt (кассовый чек) с получателем.
     payload["Receipt"] = {
         "Taxation": "usn_income",
-        "Email": "no-reply@yaslyshu.ru",
+        "Email": RECEIPT_EMAIL,
         "Items": [
             {
                 "Name": description,
@@ -180,6 +185,33 @@ def update_subscription(user_id, plan, duration_days):
     conn.commit()
     conn.close()
 
+def give_trial(user_id):
+    """Выдаёт пробный период, если он ещё не использован."""
+    conn = sqlite3.connect(DB_PATH)
+    c = conn.cursor()
+    c.execute("SELECT trial_used FROM users WHERE user_id = ?", (user_id,))
+    row = c.fetchone()
+    if row is None:
+        # Пользователя ещё нет в базе
+        expires_at = int(time.time()) + 1 * 86400
+        c.execute("INSERT OR REPLACE INTO users (user_id, subscription_plan, expires_at, reminder_time, reminder_enabled, trial_used) VALUES (?, 'trial', ?, '09:30', 1, 1)",
+                  (user_id, expires_at))
+        conn.commit()
+        conn.close()
+        return True
+    elif row[0] == 0:
+        # Триал не использован
+        expires_at = int(time.time()) + 1 * 86400
+        c.execute("UPDATE users SET subscription_plan='trial', expires_at=?, trial_used=1 WHERE user_id = ?",
+                  (expires_at, user_id))
+        conn.commit()
+        conn.close()
+        return True
+    else:
+        # Триал уже был использован
+        conn.close()
+        return False
+
 def check_subscription(user_id):
     plan, expires_at = get_user_subscription(user_id)
     if plan is None:
@@ -189,13 +221,20 @@ def check_subscription(user_id):
     return now < expires_at, plan, expires_at, days_left
 
 async def ensure_subscription(callback: types.CallbackQuery):
-    """Проверяет подписку и при необходимости выдаёт пробный доступ."""
+    """Проверяет подписку: админам всегда True, остальным — согласно статусу."""
     user_id = callback.from_user.id
+    if user_id == ADMIN_ID:
+        return True
     active, plan, expires, days_left = check_subscription(user_id)
-    if not active:
-        update_subscription(user_id, "trial", 1)
+    if active:
+        return True
+    # Если нет активной подписки, пробуем выдать trial
+    if give_trial(user_id):
         await callback.message.answer("✅ Тебе активирован пробный доступ на 24 часа. Теперь ты можешь пользоваться всеми функциями бота!")
-    return active
+        return True
+    else:
+        await callback.message.answer("⚠️ Пробный период уже был использован. Пожалуйста, оформи подписку в разделе 💎 Подписка.")
+        return False
 
 # =======================================================
 # 15 MINDFULNESS-ПРАКТИК (короткие темы)
@@ -258,6 +297,10 @@ def subscription_keyboard():
 async def start(message: types.Message, state: FSMContext):
     await state.clear()
     user_id = message.from_user.id
+    if user_id == ADMIN_ID:
+        await message.answer("👋 Привет, Маргарита! Ты администратор, тебе доступны все функции без ограничений.")
+        await message.answer("Главное меню:", reply_markup=main_menu_keyboard())
+        return
     active, plan, expires, days_left = check_subscription(user_id)
     if active:
         text = f"👋 Привет! Ты уже с нами.\nТвой тариф: {plan}\nОсталось дней: {days_left}"
@@ -268,10 +311,15 @@ async def start(message: types.Message, state: FSMContext):
 @dp.callback_query(lambda c: c.data == "start_training")
 async def start_training(callback: types.CallbackQuery, state: FSMContext):
     user_id = callback.from_user.id
-    active, plan, expires, days_left = check_subscription(user_id)
-    if not active:
-        update_subscription(user_id, "trial", 1)
-        await callback.message.answer("✅ Тебе активирован пробный доступ на 24 часа. Описывай свою ситуацию!")
+    if user_id != ADMIN_ID:
+        active, plan, expires, days_left = check_subscription(user_id)
+        if not active:
+            if give_trial(user_id):
+                await callback.message.answer("✅ Тебе активирован пробный доступ на 24 часа. Описывай свою ситуацию!")
+            else:
+                await callback.message.answer("⚠️ Пробный период уже использован. Пожалуйста, оформи подписку.")
+                await callback.answer()
+                return
     await state.set_state(EmotionStates.waiting_for_situation)
     await callback.message.answer("💬 Поделись своей ситуацией или чувством одним-двумя предложениями. Я помогу тебе разобраться.")
     await callback.answer()
@@ -280,8 +328,8 @@ async def start_training(callback: types.CallbackQuery, state: FSMContext):
 async def process_situation(message: types.Message, state: FSMContext):
     situation = message.text
     await state.update_data(situation=situation)
-    prompt = f"""Ты — тренер по эмоциональному интеллекту. Пользователь описывает ситуацию: {situation}.
-Твоя задача — помочь ему разобраться в чувствах, задавая уточняющие вопросы и направляя к осознанию. Не давай готовых советов. Будь эмпатичным, без диагностики.
+    prompt = f"""Ты — женщина-тренер по эмоциональному интеллекту. Пользователь описывает ситуацию: {situation}.
+Твоя задача — помочь ему разобраться в чувствах, задавая уточняющие вопросы и направляя к осознанию. Не давай готовых советов. Будь эмпатичной, без диагностики. Обращайся от женского лица (например, «я помогу тебе», «я слышу тебя»).
 Ответь на русском, используй эмодзи.
 ВАЖНО: Не используй звёздочки (*), подчёркивания (_) или другие символы markdown. Пиши обычным текстом."""
     await message.answer("🌱 Я слушаю... Дай мне секунду.")
@@ -294,9 +342,9 @@ async def process_followup(message: types.Message, state: FSMContext):
     user_response = message.text
     data = await state.get_data()
     situation = data.get('situation', '')
-    prompt = f"""Ты — тренер по эмоциональному интеллекту. Ранее пользователь описал ситуацию: {situation}.
+    prompt = f"""Ты — женщина-тренер по эмоциональному интеллекту. Ранее пользователь описал ситуацию: {situation}.
 Затем он ответил на твой вопрос: {user_response}.
-Продолжи диалог: задай следующий вопрос или подведи к итогу. Не давай диагнозов. Ответь на русском, без форматирования."""
+Продолжи диалог: задай следующий вопрос или подведи к итогу. Не давай диагнозов. Обращайся от женского лица. Ответь на русском, без форматирования."""
     await message.answer("🌱 Продолжаем...")
     answer = call_deepseek(prompt)
     await message.answer(answer)
@@ -349,7 +397,9 @@ async def process_subscription(callback: types.CallbackQuery):
 # =======================================================
 @dp.callback_query(lambda c: c.data == "diary")
 async def diary_start(callback: types.CallbackQuery, state: FSMContext):
-    await ensure_subscription(callback)
+    if not await ensure_subscription(callback):
+        await callback.answer()
+        return
     await callback.message.answer("📓 Как ты себя чувствуешь сегодня? (напиши одним словом или эмодзи)")
     await state.set_state(DiaryStates.waiting_for_emotion)
     await callback.answer()
@@ -385,7 +435,9 @@ async def diary_get_reason(message: types.Message, state: FSMContext):
 # =======================================================
 @dp.callback_query(lambda c: c.data == "mindfulness_menu")
 async def mindfulness_menu(callback: types.CallbackQuery):
-    await ensure_subscription(callback)
+    if not await ensure_subscription(callback):
+        await callback.answer()
+        return
     await callback.message.answer(
         "Выбери действие:",
         reply_markup=mindfulness_menu_keyboard()
@@ -394,7 +446,9 @@ async def mindfulness_menu(callback: types.CallbackQuery):
 
 @dp.callback_query(lambda c: c.data == "mindfulness_about")
 async def mindfulness_about(callback: types.CallbackQuery):
-    await ensure_subscription(callback)
+    if not await ensure_subscription(callback):
+        await callback.answer()
+        return
     await callback.message.answer(
         "📖 Что такое Mindfulness (осознанность)?\n\n"
         "Осознанность — это умение быть здесь и сейчас, без осуждения и оценок. Это не сложная философия, а простая практика: обратить внимание на дыхание, на ощущения в теле, на мысли, которые приходят и уходят, как облака.\n\n"
@@ -414,14 +468,16 @@ async def mindfulness_about(callback: types.CallbackQuery):
 
 @dp.callback_query(lambda c: c.data == "mindfulness_today")
 async def mindfulness_today(callback: types.CallbackQuery, state: FSMContext):
-    await ensure_subscription(callback)
+    if not await ensure_subscription(callback):
+        await callback.answer()
+        return
     practice = random.choice(MINDFULNESS_PRACTICES)
     practice_id = MINDFULNESS_PRACTICES.index(practice)
     await state.update_data(practice_id=practice_id)
 
     prompt = f"""
-Ты — тренер по осознанности. Предложи пользователю короткую практику mindfulness.
-
+Ты — женщина-тренер по осознанности. Предложи пользователю короткую практику mindfulness.
+Обязательно обращайся от женского лица (например, «я рада», «я помогу тебе», «я буду рядом»).
 Вот описание практики: {practice}.
 
 Дополни его:
@@ -461,7 +517,9 @@ async def mindfulness_feedback(message: types.Message, state: FSMContext):
 # =======================================================
 @dp.callback_query(lambda c: c.data == "reminder_settings")
 async def reminder_settings(callback: types.CallbackQuery, state: FSMContext):
-    await ensure_subscription(callback)
+    if not await ensure_subscription(callback):
+        await callback.answer()
+        return
     await callback.message.answer(
         "⏰ Настрой время, когда тебе удобно получать напоминание о mindfulness-практике.\n\n"
         "Введи время в формате ЧЧ:ММ (например, 09:30 или 21:00).\n\n"
@@ -492,7 +550,9 @@ async def process_reminder_time(message: types.Message, state: FSMContext):
 
 @dp.callback_query(lambda c: c.data == "reminder_off")
 async def reminder_off(callback: types.CallbackQuery):
-    await ensure_subscription(callback)
+    if not await ensure_subscription(callback):
+        await callback.answer()
+        return
     user_id = callback.from_user.id
     conn = sqlite3.connect(DB_PATH)
     c = conn.cursor()
@@ -508,7 +568,9 @@ async def reminder_off(callback: types.CallbackQuery):
 # =======================================================
 @dp.callback_query(lambda c: c.data == "my_progress")
 async def my_progress(callback: types.CallbackQuery):
-    await ensure_subscription(callback)
+    if not await ensure_subscription(callback):
+        await callback.answer()
+        return
     user_id = callback.from_user.id
     conn = sqlite3.connect(DB_PATH)
     c = conn.cursor()
