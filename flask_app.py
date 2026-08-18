@@ -435,6 +435,38 @@ async def stats(message: types.Message):
            f"⏰ Включены напоминания: {reminders_on}"
     await message.answer(text)
 
+# Команды ручной выдачи подписки (только для админа)
+@dp.message(Command("grant_week"))
+async def grant_week(message: types.Message):
+    await grant_subscription(message, 7, "week")
+
+@dp.message(Command("grant_month"))
+async def grant_month(message: types.Message):
+    await grant_subscription(message, 30, "month")
+
+@dp.message(Command("grant_year"))
+async def grant_year(message: types.Message):
+    await grant_subscription(message, 365, "year")
+
+async def grant_subscription(message: types.Message, duration_days: int, plan: str):
+    if message.from_user.id != ADMIN_ID:
+        await message.answer("У тебя нет прав для этой команды.")
+        return
+    # Если передан аргумент user_id, берём его, иначе админ себе
+    args = message.text.split()
+    if len(args) > 1:
+        try:
+            target_user_id = int(args[1])
+        except ValueError:
+            await message.answer("Неверный формат. Используй: /grant_week <user_id>")
+            return
+    else:
+        target_user_id = message.from_user.id
+    update_subscription(target_user_id, plan, duration_days)
+    end_time = int(time.time()) + duration_days * 86400
+    end_date = datetime.fromtimestamp(end_time).strftime("%d.%m.%Y")
+    await message.answer(f"✅ Подписка «{plan}» активирована для пользователя {target_user_id} до {end_date}.")
+
 @dp.callback_query(lambda c: c.data == "start_training")
 async def start_training(callback: types.CallbackQuery, state: FSMContext):
     user_id = callback.from_user.id
