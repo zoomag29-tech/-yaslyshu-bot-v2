@@ -135,6 +135,7 @@ def create_tbank_payment(amount, description, user_id):
     # Если у вас другая система налогообложения, измените значения ниже.
     payload["Receipt"] = {
         "Taxation": "usn_income",
+        "Email": "no-reply@yaslyshu.ru",
         "Items": [
             {
                 "Name": description,
