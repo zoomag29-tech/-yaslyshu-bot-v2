@@ -42,7 +42,7 @@ DB_PATH = 'yaslyshu.db'
 def init_db():
     conn = sqlite3.connect(DB_PATH)
     c = conn.cursor()
-    # Создаём таблицу пользователей с расширенными полями
+    # Создаём таблицу пользователей
     c.execute('''CREATE TABLE IF NOT EXISTS users
                  (user_id INTEGER PRIMARY KEY, 
                   subscription_plan TEXT, 
@@ -50,16 +50,19 @@ def init_db():
                   reminder_time TEXT DEFAULT '09:30',
                   reminder_enabled INTEGER DEFAULT 1,
                   trial_used INTEGER DEFAULT 0,
-                  name TEXT,
-                  age INTEGER,
                   gender TEXT,
                   created_at INTEGER)''')
-    # Добавляем недостающие колонки для совместимости
-    for col in ["trial_used", "name", "age", "gender", "created_at"]:
+    # Для существующих БД добавляем недостающие колонки
+    for col in ["trial_used", "gender", "created_at"]:
         try:
-            c.execute(f"ALTER TABLE users ADD COLUMN {col} INTEGER DEFAULT 0" if col == "trial_used" else f"ALTER TABLE users ADD COLUMN {col} TEXT")
+            if col == "trial_used":
+                c.execute("ALTER TABLE users ADD COLUMN trial_used INTEGER DEFAULT 0")
+            elif col == "gender":
+                c.execute("ALTER TABLE users ADD COLUMN gender TEXT")
+            else:
+                c.execute("ALTER TABLE users ADD COLUMN created_at INTEGER")
         except sqlite3.OperationalError:
-            pass  # колонка уже есть
+            pass
     c.execute('''CREATE TABLE IF NOT EXISTS diary_entries
                  (user_id INTEGER, date TEXT, emotion TEXT, reason TEXT)''')
     c.execute('''CREATE TABLE IF NOT EXISTS mindfulness_log
@@ -93,9 +96,7 @@ class MindfulnessStates(StatesGroup):
 class ReminderStates(StatesGroup):
     waiting_for_time = State()
 
-class ProfileStates(StatesGroup):
-    waiting_for_name = State()
-    waiting_for_age = State()
+class GenderState(StatesGroup):
     waiting_for_gender = State()
 
 # =======================================================
@@ -123,6 +124,22 @@ def ensure_user(user_id):
     c.execute("SELECT user_id FROM users WHERE user_id = ?", (user_id,))
     if c.fetchone() is None:
         c.execute("INSERT OR IGNORE INTO users (user_id, created_at) VALUES (?, ?)", (user_id, int(time.time())))
+    conn.commit()
+    conn.close()
+
+def get_user_gender(user_id):
+    """Возвращает пол пользователя: 'male' или 'female'."""
+    conn = sqlite3.connect(DB_PATH)
+    c = conn.cursor()
+    c.execute("SELECT gender FROM users WHERE user_id = ?", (user_id,))
+    row = c.fetchone()
+    conn.close()
+    return row[0] if row and row[0] else None
+
+def set_user_gender(user_id, gender):
+    conn = sqlite3.connect(DB_PATH)
+    c = conn.cursor()
+    c.execute("UPDATE users SET gender = ? WHERE user_id = ?", (gender, user_id))
     conn.commit()
     conn.close()
 
@@ -303,9 +320,8 @@ def subscription_keyboard():
 
 def gender_keyboard():
     builder = InlineKeyboardBuilder()
-    builder.button(text="Женский", callback_data="gender_female")
-    builder.button(text="Мужской", callback_data="gender_male")
-    builder.button(text="Пропустить", callback_data="skip_gender")
+    builder.button(text="Я девушка", callback_data="gender_female")
+    builder.button(text="Я парень", callback_data="gender_male")
     builder.adjust(2)
     return builder.as_markup()
 
@@ -321,81 +337,27 @@ async def start(message: types.Message, state: FSMContext):
         await message.answer("👋 Привет, Маргарита! Ты администратор, тебе доступны все функции без ограничений.")
         await message.answer("Главное меню:", reply_markup=main_menu_keyboard())
         return
-    # Проверяем, заполнен ли профиль
-    conn = sqlite3.connect(DB_PATH)
-    c = conn.cursor()
-    c.execute("SELECT name FROM users WHERE user_id = ?", (user_id,))
-    name = c.fetchone()
-    conn.close()
-    if name and name[0]:
+    # Проверяем, указан ли пол
+    gender = get_user_gender(user_id)
+    if gender is None:
+        await message.answer("🌸 Привет! Добро пожаловать в «я слышу».\n\nЧтобы я могла обращаться к тебе правильно, скажи: ты девушка или парень?", reply_markup=gender_keyboard())
+        await state.set_state(GenderState.waiting_for_gender)
+    else:
         active, plan, expires, days_left = check_subscription(user_id)
         if active:
             text = f"👋 Привет! Ты уже с нами.\nТвой тариф: {plan}\nОсталось дней: {days_left}"
         else:
             text = "👋 Привет! Я — «я слышу». Твой персональный наставник по эмоциональному интеллекту и осознанности.\n\n📓 Веди дневник эмоций.\n🧘 Каждый день выполняй mindfulness-практику.\n📊 Отслеживай свой прогресс.\n\nНачни бесплатный пробный период прямо сейчас — нажми любую кнопку."
         await message.answer(text, reply_markup=main_menu_keyboard())
-    else:
-        # Спрашиваем имя
-        await message.answer("🌸 Привет! Я — «я слышу». Давай познакомимся, чтобы я могла обращаться к тебе по имени.\n\nНапиши, как тебя зовут:")
-        await state.set_state(ProfileStates.waiting_for_name)
 
-@dp.message(ProfileStates.waiting_for_name)
-async def process_name(message: types.Message, state: FSMContext):
-    name = message.text.strip()
-    await state.update_data(name=name)
-    await message.answer("Отлично! Сколько тебе лет?")
-    await state.set_state(ProfileStates.waiting_for_age)
-
-@dp.message(ProfileStates.waiting_for_age)
-async def process_age(message: types.Message, state: FSMContext):
-    age_text = message.text.strip()
-    if not age_text.isdigit():
-        await message.answer("Пожалуйста, введи возраст цифрой.")
-        return
-    age = int(age_text)
-    await state.update_data(age=age)
-    await message.answer("И последнее: укажи свой пол, чтобы я могла обращаться к тебе правильно.", reply_markup=gender_keyboard())
-    await state.set_state(ProfileStates.waiting_for_gender)
-
-@dp.callback_query(ProfileStates.waiting_for_gender, F.data.startswith("gender_"))
+@dp.callback_query(GenderState.waiting_for_gender, F.data.startswith("gender_"))
 async def process_gender(callback: types.CallbackQuery, state: FSMContext):
     gender = callback.data.split("_")[1]
-    data = await state.get_data()
     user_id = callback.from_user.id
-    name = data.get("name", "")
-    age = data.get("age", 0)
-    # Сохраняем в базу
-    conn = sqlite3.connect(DB_PATH)
-    c = conn.cursor()
-    c.execute("UPDATE users SET name = ?, age = ?, gender = ? WHERE user_id = ?",
-              (name, age, gender, user_id))
-    conn.commit()
-    conn.close()
+    set_user_gender(user_id, gender)
     await state.clear()
-    await callback.message.answer(f"🌿 Спасибо, {name}! Теперь я буду знать, как к тебе обращаться.")
-    # Показываем меню
-    active, plan, expires, days_left = check_subscription(user_id)
-    if active:
-        text = f"👋 Ты уже с нами.\nТвой тариф: {plan}\nОсталось дней: {days_left}"
-    else:
-        text = "Начни бесплатный пробный период прямо сейчас — нажми любую кнопку."
-    await callback.message.answer(text, reply_markup=main_menu_keyboard())
-    await callback.answer()
-
-@dp.callback_query(ProfileStates.waiting_for_gender, F.data == "skip_gender")
-async def skip_gender(callback: types.CallbackQuery, state: FSMContext):
-    data = await state.get_data()
-    user_id = callback.from_user.id
-    name = data.get("name", "")
-    age = data.get("age", 0)
-    conn = sqlite3.connect(DB_PATH)
-    c = conn.cursor()
-    c.execute("UPDATE users SET name = ?, age = ? WHERE user_id = ?",
-              (name, age, user_id))
-    conn.commit()
-    conn.close()
-    await state.clear()
-    await callback.message.answer("Хорошо, продолжим без пола.")
+    pronoun = "девушка" if gender == "female" else "парень"
+    await callback.message.answer(f"Спасибо! Теперь я буду обращаться к тебе правильно 😊")
     active, plan, expires, days_left = check_subscription(user_id)
     if active:
         text = f"👋 Ты уже с нами.\nТвой тариф: {plan}\nОсталось дней: {days_left}"
@@ -459,8 +421,11 @@ async def start_training(callback: types.CallbackQuery, state: FSMContext):
 async def process_situation(message: types.Message, state: FSMContext):
     situation = message.text
     await state.update_data(situation=situation)
-    prompt = f"""Ты — женщина-тренер по эмоциональному интеллекту. Пользователь описывает ситуацию: {situation}.
-Твоя задача — помочь ему разобраться в чувствах, задавая уточняющие вопросы и направляя к осознанию. Не давай готовых советов. Будь эмпатичной, без диагностики. Обращайся от женского лица (например, «я помогу тебе», «я слышу тебя»).
+    user_id = message.from_user.id
+    gender = get_user_gender(user_id)
+    gender_text = "мужчина" if gender == "male" else "женщина" if gender == "female" else "человек"
+    prompt = f"""Ты — женщина-тренер по эмоциональному интеллекту. Пользователь ({gender_text}) описывает ситуацию: {situation}.
+Твоя задача — помочь ему разобраться в чувствах, задавая уточняющие вопросы и направляя к осознанию. Не давай готовых советов. Будь эмпатичной, без диагностики. Обращайся от женского лица, но учитывай пол пользователя: если пользователь мужчина, используй мужской род, если женщина — женский.
 Ответь на русском, используй эмодзи.
 ВАЖНО: Не используй звёздочки (*), подчёркивания (_) или другие символы markdown. Пиши обычным текстом."""
     await message.answer("🌱 Я слушаю... Дай мне секунду.")
@@ -473,9 +438,12 @@ async def process_followup(message: types.Message, state: FSMContext):
     user_response = message.text
     data = await state.get_data()
     situation = data.get('situation', '')
-    prompt = f"""Ты — женщина-тренер по эмоциональному интеллекту. Ранее пользователь описал ситуацию: {situation}.
+    user_id = message.from_user.id
+    gender = get_user_gender(user_id)
+    gender_text = "мужчина" if gender == "male" else "женщина" if gender == "female" else "человек"
+    prompt = f"""Ты — женщина-тренер по эмоциональному интеллекту. Ранее пользователь ({gender_text}) описал ситуацию: {situation}.
 Затем он ответил на твой вопрос: {user_response}.
-Продолжи диалог: задай следующий вопрос или подведи к итогу. Не давай диагнозов. Обращайся от женского лица. Ответь на русском, без форматирования."""
+Продолжи диалог: задай следующий вопрос или подведи к итогу. Не давай диагнозов. Обращайся от женского лица, но учитывай пол пользователя. Ответь на русском, без форматирования."""
     await message.answer("🌱 Продолжаем...")
     answer = call_deepseek(prompt)
     await message.answer(answer)
@@ -606,9 +574,12 @@ async def mindfulness_today(callback: types.CallbackQuery, state: FSMContext):
     practice_id = MINDFULNESS_PRACTICES.index(practice)
     await state.update_data(practice_id=practice_id)
 
+    user_id = callback.from_user.id
+    gender = get_user_gender(user_id)
+    gender_text = "мужчина" if gender == "male" else "женщина" if gender == "female" else "человек"
     prompt = f"""
-Ты — женщина-тренер по осознанности. Предложи пользователю короткую практику mindfulness.
-Обязательно обращайся от женского лица (например, «я рада», «я помогу тебе», «я буду рядом»).
+Ты — женщина-тренер по осознанности. Предложи пользователю ({gender_text}) короткую практику mindfulness.
+Обязательно обращайся от женского лица, но используй правильный род для пользователя.
 Вот описание практики: {practice}.
 
 Дополни его:
