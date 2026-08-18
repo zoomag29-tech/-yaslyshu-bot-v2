@@ -10,4 +10,4 @@ RUN pip install --no-cache-dir -r requirements.txt
 COPY flask_app.py .
 COPY background_music.mp3 .
 
-CMD ["gunicorn", "-w", "1", "flask_app:app"]
+CMD ["gunicorn", "-w", "1", "flask_app:app"] 
