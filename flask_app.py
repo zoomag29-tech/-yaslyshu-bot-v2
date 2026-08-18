@@ -108,20 +108,25 @@ def create_tbank_payment(amount, description, user_id):
     amount_kop = amount * 100
     order_id = f"order_{user_id}_{int(time.time())}"
     
-    # Генерация токена (SHA256)
-    token_str = f"{TERMINAL_KEY}{order_id}{amount_kop}{description}{TERMINAL_PASSWORD}"
-    token = hashlib.sha256(token_str.encode('utf-8')).hexdigest()
-    
     payload = {
         "TerminalKey": TERMINAL_KEY,
         "Amount": amount_kop,
         "OrderId": order_id,
         "Description": description,
-        "Token": token,
         "NotificationURL": "https://yaslyshu-bot-v2.onrender.com/payment_webhook",
         "SuccessURL": "https://t.me/yaslyshu_bot",
         "FailURL": "https://t.me/yaslyshu_bot"
     }
+    
+    # Генерация токена по правилам Т-Банка:
+    # 1. Сортируем ключи по алфавиту
+    # 2. Склеиваем значения без разделителей
+    # 3. Добавляем пароль в конец
+    token_str = ''.join(str(payload[k]) for k in sorted(payload.keys()))
+    token_str += TERMINAL_PASSWORD
+    token = hashlib.sha256(token_str.encode('utf-8')).hexdigest()
+    payload["Token"] = token
+    
     try:
         response = requests.post(url, json=payload, timeout=10, verify=False)
         response.raise_for_status()
