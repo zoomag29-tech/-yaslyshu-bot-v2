@@ -1,4 +1,4 @@
-import random, time, asyncio, requests, re, traceback, sqlite3, os
+import random, time, asyncio, requests, re, traceback, os
 from datetime import datetime, timedelta
 from aiogram import Bot, Dispatcher, types, F
 from aiogram.filters import Command
@@ -12,6 +12,7 @@ from aiogram.types import Update
 from openai import OpenAI
 import httpx
 import hashlib
+import psycopg2
 
 # =======================================================
 # КОНФИГУРАЦИЯ
@@ -24,9 +25,10 @@ CONTACT = "@MARGOKARDATOVA"
 TERMINAL_KEY = os.environ.get("TERMINAL_KEY")
 TERMINAL_PASSWORD = os.environ.get("TERMINAL_PASSWORD")
 RECEIPT_EMAIL = os.environ.get("RECEIPT_EMAIL", "no-reply@example.com")
+DATABASE_URL = os.environ.get("DATABASE_URL")
 
-if not BOT_TOKEN or not DEEPSEEK_API_KEY or not TERMINAL_KEY or not TERMINAL_PASSWORD:
-    raise RuntimeError("Не заданы обязательные переменные окружения")
+if not BOT_TOKEN or not DEEPSEEK_API_KEY or not TERMINAL_KEY or not TERMINAL_PASSWORD or not DATABASE_URL:
+    raise RuntimeError("Не заданы обязательные переменные окружения: BOT_TOKEN, DEEPSEEK_API_KEY, TERMINAL_KEY, TERMINAL_PASSWORD, DATABASE_URL")
 
 # =======================================================
 # DEEPSEEK
@@ -35,60 +37,61 @@ http_client = httpx.Client(trust_env=False)
 client = OpenAI(api_key=DEEPSEEK_API_KEY, base_url="https://api.deepseek.com", http_client=http_client)
 
 # =======================================================
-# БАЗА ДАННЫХ
+# БАЗА ДАННЫХ (PostgreSQL)
 # =======================================================
-DB_PATH = 'yaslyshu.db'
+def get_db_connection():
+    return psycopg2.connect(DATABASE_URL, sslmode='require')
 
 def init_db():
-    conn = sqlite3.connect(DB_PATH)
+    conn = get_db_connection()
     c = conn.cursor()
     # Пользователи
-    c.execute('''CREATE TABLE IF NOT EXISTS users
-                 (user_id INTEGER PRIMARY KEY, 
-                  subscription_plan TEXT, 
-                  expires_at INTEGER,
-                  reminder_time TEXT DEFAULT '09:30',
-                  reminder_enabled INTEGER DEFAULT 1,
-                  trial_used INTEGER DEFAULT 0,
-                  gender TEXT,
-                  created_at INTEGER)''')
-    for col in ["trial_used", "gender", "created_at"]:
-        try:
-            if col == "trial_used":
-                c.execute("ALTER TABLE users ADD COLUMN trial_used INTEGER DEFAULT 0")
-            elif col == "gender":
-                c.execute("ALTER TABLE users ADD COLUMN gender TEXT")
-            else:
-                c.execute("ALTER TABLE users ADD COLUMN created_at INTEGER")
-        except sqlite3.OperationalError:
-            pass
+    c.execute('''CREATE TABLE IF NOT EXISTS users (
+                 user_id BIGINT PRIMARY KEY,
+                 subscription_plan TEXT,
+                 expires_at BIGINT,
+                 reminder_time TEXT DEFAULT '09:30',
+                 reminder_enabled INTEGER DEFAULT 1,
+                 trial_used INTEGER DEFAULT 0,
+                 gender TEXT,
+                 created_at BIGINT
+                 )''')
     # Платежи
-    c.execute('''CREATE TABLE IF NOT EXISTS payments
-                 (order_id TEXT PRIMARY KEY,
-                  user_id INTEGER,
-                  plan TEXT,
-                  duration_days INTEGER,
-                  amount INTEGER,
-                  created_at INTEGER,
-                  status TEXT DEFAULT 'pending')''')
-    # Дневник (расширенный)
-    c.execute('''CREATE TABLE IF NOT EXISTS diary_entries
-                 (user_id INTEGER,
-                  date TEXT,
-                  emotion TEXT,
-                  emotion_group TEXT,
-                  intensity INTEGER,
-                  reason TEXT)''')
+    c.execute('''CREATE TABLE IF NOT EXISTS payments (
+                 order_id TEXT PRIMARY KEY,
+                 user_id BIGINT,
+                 plan TEXT,
+                 duration_days INTEGER,
+                 amount INTEGER,
+                 created_at BIGINT,
+                 status TEXT DEFAULT 'pending'
+                 )''')
+    # Дневник
+    c.execute('''CREATE TABLE IF NOT EXISTS diary_entries (
+                 id SERIAL PRIMARY KEY,
+                 user_id BIGINT,
+                 date TIMESTAMP,
+                 emotion TEXT,
+                 emotion_group TEXT,
+                 intensity INTEGER,
+                 reason TEXT
+                 )''')
     # Практики
-    c.execute('''CREATE TABLE IF NOT EXISTS mindfulness_log
-                 (user_id INTEGER, date TEXT, practice_id INTEGER, feedback TEXT)''')
+    c.execute('''CREATE TABLE IF NOT EXISTS mindfulness_log (
+                 id SERIAL PRIMARY KEY,
+                 user_id BIGINT,
+                 date DATE,
+                 practice_id INTEGER,
+                 feedback TEXT
+                 )''')
     # Прогресс школы
-    c.execute('''CREATE TABLE IF NOT EXISTS school_progress
-                 (user_id INTEGER,
-                  module_id INTEGER,
-                  lesson_id INTEGER,
-                  completed INTEGER DEFAULT 0,
-                  PRIMARY KEY (user_id, module_id, lesson_id))''')
+    c.execute('''CREATE TABLE IF NOT EXISTS school_progress (
+                 user_id BIGINT,
+                 module_id INTEGER,
+                 lesson_id INTEGER,
+                 completed INTEGER DEFAULT 0,
+                 PRIMARY KEY (user_id, module_id, lesson_id)
+                 )''')
     conn.commit()
     conn.close()
 
@@ -147,26 +150,27 @@ def call_deepseek(prompt: str) -> str:
         return "Извините, сейчас сервис временно недоступен. Попробуйте позже."
 
 def ensure_user(user_id):
-    conn = sqlite3.connect(DB_PATH)
+    conn = get_db_connection()
     c = conn.cursor()
-    c.execute("SELECT user_id FROM users WHERE user_id = ?", (user_id,))
+    c.execute("SELECT user_id FROM users WHERE user_id = %s", (user_id,))
     if c.fetchone() is None:
-        c.execute("INSERT OR IGNORE INTO users (user_id, created_at) VALUES (?, ?)", (user_id, int(time.time())))
-    conn.commit()
+        c.execute("INSERT INTO users (user_id, created_at) VALUES (%s, %s)", (user_id, int(time.time())))
+        conn.commit()
     conn.close()
 
 def get_user_gender(user_id):
-    conn = sqlite3.connect(DB_PATH)
+    conn = get_db_connection()
     c = conn.cursor()
-    c.execute("SELECT gender FROM users WHERE user_id = ?", (user_id,))
+    c.execute("SELECT gender FROM users WHERE user_id = %s", (user_id,))
     row = c.fetchone()
     conn.close()
     return row[0] if row and row[0] else None
 
 def set_user_gender(user_id, gender):
-    conn = sqlite3.connect(DB_PATH)
+    ensure_user(user_id)
+    conn = get_db_connection()
     c = conn.cursor()
-    c.execute("UPDATE users SET gender = ? WHERE user_id = ?", (gender, user_id))
+    c.execute("UPDATE users SET gender = %s WHERE user_id = %s", (gender, user_id))
     conn.commit()
     conn.close()
 
@@ -195,15 +199,7 @@ def create_tbank_payment(amount, description, user_id, plan, duration_days):
     payload["Receipt"] = {
         "Taxation": "usn_income",
         "Email": RECEIPT_EMAIL,
-        "Items": [
-            {
-                "Name": description,
-                "Price": amount_kop,
-                "Quantity": 1,
-                "Amount": amount_kop,
-                "Tax": "none"
-            }
-        ]
+        "Items": [{"Name": description, "Price": amount_kop, "Quantity": 1, "Amount": amount_kop, "Tax": "none"}]
     }
     try:
         response = requests.post(url, json=payload, timeout=10, verify=False)
@@ -223,58 +219,56 @@ def create_tbank_payment(amount, description, user_id, plan, duration_days):
         return None, None, error_text
 
 def save_payment(order_id, user_id, plan, duration_days, amount):
-    conn = sqlite3.connect(DB_PATH)
+    conn = get_db_connection()
     c = conn.cursor()
-    c.execute("INSERT OR REPLACE INTO payments (order_id, user_id, plan, duration_days, amount, created_at, status) VALUES (?, ?, ?, ?, ?, ?, 'pending')",
+    c.execute("INSERT INTO payments (order_id, user_id, plan, duration_days, amount, created_at, status) VALUES (%s,%s,%s,%s,%s,%s,'pending') ON CONFLICT (order_id) DO UPDATE SET status='pending'",
               (order_id, user_id, plan, duration_days, amount, int(time.time())))
     conn.commit()
     conn.close()
 
 def get_payment(order_id):
-    conn = sqlite3.connect(DB_PATH)
+    conn = get_db_connection()
     c = conn.cursor()
-    c.execute("SELECT user_id, plan, duration_days, status FROM payments WHERE order_id = ?", (order_id,))
+    c.execute("SELECT user_id, plan, duration_days, status FROM payments WHERE order_id = %s", (order_id,))
     row = c.fetchone()
     conn.close()
     return row
 
 def update_payment_status(order_id, status):
-    conn = sqlite3.connect(DB_PATH)
+    conn = get_db_connection()
     c = conn.cursor()
-    c.execute("UPDATE payments SET status = ? WHERE order_id = ?", (status, order_id))
+    c.execute("UPDATE payments SET status = %s WHERE order_id = %s", (status, order_id))
     conn.commit()
     conn.close()
 
 def get_user_subscription(user_id):
-    conn = sqlite3.connect(DB_PATH)
+    conn = get_db_connection()
     c = conn.cursor()
-    c.execute("SELECT subscription_plan, expires_at FROM users WHERE user_id = ?", (user_id,))
+    c.execute("SELECT subscription_plan, expires_at FROM users WHERE user_id = %s", (user_id,))
     row = c.fetchone()
     conn.close()
     return row if row else (None, 0)
 
 def update_subscription(user_id, plan, duration_days):
     ensure_user(user_id)
-    conn = sqlite3.connect(DB_PATH)
+    conn = get_db_connection()
     c = conn.cursor()
     expires_at = int(time.time()) + duration_days * 86400
-    c.execute("UPDATE users SET subscription_plan = ?, expires_at = ? WHERE user_id = ?",
-              (plan, expires_at, user_id))
+    c.execute("UPDATE users SET subscription_plan = %s, expires_at = %s WHERE user_id = %s", (plan, expires_at, user_id))
     conn.commit()
     conn.close()
 
 def give_trial(user_id):
     ensure_user(user_id)
-    conn = sqlite3.connect(DB_PATH)
+    conn = get_db_connection()
     c = conn.cursor()
-    c.execute("SELECT trial_used FROM users WHERE user_id = ?", (user_id,))
+    c.execute("SELECT trial_used FROM users WHERE user_id = %s", (user_id,))
     row = c.fetchone()
     if row and row[0] == 1:
         conn.close()
         return False
     expires_at = int(time.time()) + 1 * 86400
-    c.execute("UPDATE users SET subscription_plan='trial', expires_at=?, trial_used=1 WHERE user_id = ?",
-              (expires_at, user_id))
+    c.execute("UPDATE users SET subscription_plan='trial', expires_at=%s, trial_used=1 WHERE user_id = %s", (expires_at, user_id))
     conn.commit()
     conn.close()
     return True
@@ -302,166 +296,32 @@ async def ensure_subscription(callback: types.CallbackQuery):
         return False
 
 # =======================================================
-# ЭМОЦИИ (справочники)
+# ЭМОЦИИ
 # =======================================================
 EMOTION_GROUPS = {
-    "😊 Радость и позитивные": [
-        "Радость", "Счастье", "Благодарность", "Гордость", "Надежда",
-        "Восторг", "Умиротворение", "Любовь", "Вдохновение", "Интерес",
-        "Удовлетворение", "Нежность", "Восхищение", "Ликование", "Спокойствие",
-        "Облегчение", "Уверенность", "Энтузиазм", "Тепло", "Симпатия",
-        "Признательность", "Доверие", "Радость общения", "Оптимизм"
-    ],
-    "😢 Грусть и подавленность": [
-        "Грусть", "Печаль", "Одиночество", "Разочарование", "Тоска",
-        "Сожаление", "Уныние", "Безысходность", "Подавленность", "Скука",
-        "Опустошённость", "Меланхолия", "Скорбь", "Жалость", "Разбитость",
-        "Ностальгия", "Утрата", "Беспомощность", "Отчаяние", "Усталость"
-    ],
-    "😠 Злость и раздражение": [
-        "Раздражение", "Злость", "Гнев", "Обида", "Зависть",
-        "Возмущение", "Ярость", "Недовольство", "Враждебность", "Досада",
-        "Ревность", "Бешенство", "Нетерпение", "Презрение", "Отвращение",
-        "Агрессия", "Фрустрация"
-    ],
-    "😨 Страх и тревога": [
-        "Тревога", "Страх", "Паника", "Неуверенность", "Беспокойство",
-        "Ужас", "Испуг", "Нервозность", "Опасение", "Растерянность",
-        "Застенчивость", "Напряжение", "Волнение", "Сомнение", "Скованность",
-        "Боязнь", "Фобия", "Осторожность"
-    ],
-    "😞 Стыд, вина, самооценка": [
-        "Стыд", "Вина", "Смущение", "Унижение", "Раскаяние",
-        "Самоедство", "Неловкость", "Сожаление о себе", "Самокритика",
-        "Чувство неполноценности"
-    ],
-    "🤢 Отвращение и неприятие": [
-        "Отвращение", "Неприязнь", "Омерзение", "Отторжение", "Брезгливость"
-    ],
-    "😲 Удивление и любопытство": [
-        "Удивление", "Изумление", "Любопытство", "Растерянность",
-        "Потрясение", "Внезапность", "Озадаченность", "Заинтригованность"
-    ],
-    "💞 Сложные и смешанные": [
-        "Амбивалентность", "Любовь-ненависть", "Трепет", "Восторг со страхом",
-        "Облегчение с грустью", "Ревность с любовью", "Смущение с радостью",
-        "Вина с облегчением", "Ностальгия с теплом", "Скука с тревогой"
-    ]
+    "😊 Радость и позитивные": ["Радость", "Счастье", "Благодарность", "Гордость", "Надежда", "Восторг", "Умиротворение", "Любовь", "Вдохновение", "Интерес", "Удовлетворение", "Нежность", "Восхищение", "Ликование", "Спокойствие", "Облегчение", "Уверенность", "Энтузиазм", "Тепло", "Симпатия", "Признательность", "Доверие", "Радость общения", "Оптимизм"],
+    "😢 Грусть и подавленность": ["Грусть", "Печаль", "Одиночество", "Разочарование", "Тоска", "Сожаление", "Уныние", "Безысходность", "Подавленность", "Скука", "Опустошённость", "Меланхолия", "Скорбь", "Жалость", "Разбитость", "Ностальгия", "Утрата", "Беспомощность", "Отчаяние", "Усталость"],
+    "😠 Злость и раздражение": ["Раздражение", "Злость", "Гнев", "Обида", "Зависть", "Возмущение", "Ярость", "Недовольство", "Враждебность", "Досада", "Ревность", "Бешенство", "Нетерпение", "Презрение", "Отвращение", "Агрессия", "Фрустрация"],
+    "😨 Страх и тревога": ["Тревога", "Страх", "Паника", "Неуверенность", "Беспокойство", "Ужас", "Испуг", "Нервозность", "Опасение", "Растерянность", "Застенчивость", "Напряжение", "Волнение", "Сомнение", "Скованность", "Боязнь", "Фобия", "Осторожность"],
+    "😞 Стыд, вина, самооценка": ["Стыд", "Вина", "Смущение", "Унижение", "Раскаяние", "Самоедство", "Неловкость", "Сожаление о себе", "Самокритика", "Чувство неполноценности"],
+    "🤢 Отвращение и неприятие": ["Отвращение", "Неприязнь", "Омерзение", "Отторжение", "Брезгливость"],
+    "😲 Удивление и любопытство": ["Удивление", "Изумление", "Любопытство", "Растерянность", "Потрясение", "Внезапность", "Озадаченность", "Заинтригованность"],
+    "💞 Сложные и смешанные": ["Амбивалентность", "Любовь-ненависть", "Трепет", "Восторг со страхом", "Облегчение с грустью", "Ревность с любовью", "Смущение с радостью", "Вина с облегчением", "Ностальгия с теплом", "Скука с тревогой"]
 }
 
 # =======================================================
-# ШКОЛА ЭМОЦИЙ (9 модулей)
+# ШКОЛА ЭМОЦИЙ
 # =======================================================
 SCHOOL_MODULES = [
-    {
-        "id": 1,
-        "title": "Что такое эмоциональный интеллект?",
-        "description": "Введение в EQ, базовые эмоции, знакомство с инструментами бота.",
-        "lessons": [
-            "Эмоциональный интеллект — это способность понимать свои и чужие эмоции и управлять ими.\n\nИз чего состоит EQ:\n- Самосознание\n- Самоконтроль\n- Эмпатия\n- Навыки общения",
-            "Базовые эмоции: радость, грусть, злость, страх, отвращение, удивление, доверие.\n\nЭти эмоции есть у всех людей, они помогают нам реагировать на мир.",
-            "Инструменты бота:\n\n📓 Дневник эмоций — чтобы фиксировать и анализировать свои состояния.\n🧘 Mindfulness — чтобы успокаивать ум и снижать интенсивность эмоций.\n💬 Поговорим — чтобы не копить эмоции, а разбирать их в диалоге.",
-            "Задание: выбери одну базовую эмоцию и запиши её в дневник с интенсивностью от 1 до 10."
-        ],
-        "task_type": "diary",
-        "task_practice_id": None
-    },
-    {
-        "id": 2,
-        "title": "Самосознание",
-        "description": "Научись замечать и называть свои эмоции.",
-        "lessons": [
-            "Самосознание — это умение замечать свои эмоции в момент их появления.\n\nНаблюдай за телом: как физически проявляется злость или страх?",
-            "Называй эмоции словами: «я сейчас тревожусь» или «я устал», а не просто «мне плохо».",
-            "Задание: в течение 3 дней записывай по одной эмоции в дневник с интенсивностью и причиной."
-        ],
-        "task_type": "diary",
-        "task_practice_id": None
-    },
-    {
-        "id": 3,
-        "title": "Радость и позитивные состояния",
-        "description": "Расширь палитру положительных эмоций, научись их замечать.",
-        "lessons": [
-            "Позитивные эмоции — не просто приятные состояния. Они укрепляют здоровье, отношения и устойчивость.",
-            "Учись закреплять радость: замечай её, называй, благодари.",
-            "Задание: запиши 3 положительные эмоции за неделю в дневник."
-        ],
-        "task_type": "diary",
-        "task_practice_id": None
-    },
-    {
-        "id": 4,
-        "title": "Грусть и подавленные состояния",
-        "description": "Научись принимать грусть, не бояться её.",
-        "lessons": [
-            "Грусть — это нормально. Она помогает переработать потери и сигнализирует о потребности в заботе.",
-            "Не подавляй грусть, а дай ей место. Плач может быть исцеляющим.",
-            "Задание: запиши ситуацию, вызвавшую грусть, и разбери её в «Поговорим» или дневнике."
-        ],
-        "task_type": "diary",
-        "task_practice_id": None
-    },
-    {
-        "id": 5,
-        "title": "Злость и раздражение",
-        "description": "Научись экологично выражать злость.",
-        "lessons": [
-            "Злость — это энергия, которая защищает границы. Важно не подавлять её, а выражать безопасно.",
-            "Дыхательные практики помогают снизить накал злости и вернуть контроль.",
-            "Задание: выполни дыхательную практику «Дыхание 4-4-4» через Mindfulness, затем запиши свою злость в дневник."
-        ],
-        "task_type": "mindfulness",
-        "task_practice_id": 1  # 1 соответствует дыханию 4-4-4
-    },
-    {
-        "id": 6,
-        "title": "Страх и тревога",
-        "description": "Научись распознавать тревогу и снижать её.",
-        "lessons": [
-            "Страх — реакция на реальную угрозу, тревога — на воображаемую. Их можно успокоить через тело.",
-            "Практики заземления и дыхания — первая помощь при тревоге.",
-            "Задание: запиши тревожную ситуацию + выполни mindfulness."
-        ],
-        "task_type": "mindfulness",
-        "task_practice_id": 2
-    },
-    {
-        "id": 7,
-        "title": "Стыд, вина и самооценка",
-        "description": "Проработай сложные чувства, связанные с самооценкой.",
-        "lessons": [
-            "Стыд — «я плохой», вина — «я сделал плохо». Важно разделять их.",
-            "Практика самосострадания: относись к себе как к другу.",
-            "Задание: запиши ситуацию стыда/вины и разбери её в «Поговорим»."
-        ],
-        "task_type": "diary",
-        "task_practice_id": None
-    },
-    {
-        "id": 8,
-        "title": "Отвращение, удивление и сложные состояния",
-        "description": "Охвати оставшиеся базовые и смешанные эмоции.",
-        "lessons": [
-            "Эмоции могут смешиваться: любовь-ненависть, грусть-радость. Это нормально.",
-            "Расширяй словарь эмоций, чтобы точнее понимать себя.",
-            "Задание: найди и запиши смешанную эмоцию из своей жизни."
-        ],
-        "task_type": "diary",
-        "task_practice_id": None
-    },
-    {
-        "id": 9,
-        "title": "Интеграция и навыки общения",
-        "description": "Примени всё в отношениях.",
-        "lessons": [
-            "Эмпатия — это умение поставить себя на место другого и понять его чувства.",
-            "Выражай чувства конструктивно: «Я-сообщения» вместо обвинений.",
-            "Задание: проведи диалог в «Поговорим» на тему сложного общения и подведи итоги."
-        ],
-        "task_type": "talk",
-        "task_practice_id": None
-    }
+    {"id":1, "title":"Что такое эмоциональный интеллект?", "lessons":["...","...","...","Задание: выбери одну базовую эмоцию и запиши её в дневник."], "task_type":"diary"},
+    {"id":2, "title":"Самосознание", "lessons":["...","...","Задание: в течение 3 дней записывай по одной эмоции в дневник."], "task_type":"diary"},
+    {"id":3, "title":"Радость и позитивные состояния", "lessons":["...","...","Задание: запиши 3 положительные эмоции за неделю."], "task_type":"diary"},
+    {"id":4, "title":"Грусть и подавленные состояния", "lessons":["...","...","Задание: запиши грусть и разбери в Поговорим."], "task_type":"diary"},
+    {"id":5, "title":"Злость и раздражение", "lessons":["...","...","Задание: выполни дыхательную практику и запиши злость."], "task_type":"mindfulness", "task_practice_id":1},
+    {"id":6, "title":"Страх и тревога", "lessons":["...","...","Задание: запиши тревожную ситуацию + выполни mindfulness."], "task_type":"mindfulness", "task_practice_id":2},
+    {"id":7, "title":"Стыд, вина и самооценка", "lessons":["...","...","Задание: запиши стыд/вину и разбери в Поговорим."], "task_type":"diary"},
+    {"id":8, "title":"Отвращение, удивление и сложные состояния", "lessons":["...","...","Задание: найди и запиши смешанную эмоцию."], "task_type":"diary"},
+    {"id":9, "title":"Интеграция и навыки общения", "lessons":["...","...","Задание: проведи диалог в Поговорим."], "task_type":"talk"}
 ]
 
 # =======================================================
@@ -476,7 +336,7 @@ def main_menu_keyboard():
     builder.button(text="📊 Мой прогресс", callback_data="my_progress")
     builder.button(text="💎 Подписка", callback_data="subscribe_menu")
     builder.button(text="📞 Поддержка", callback_data="support")
-    builder.adjust(1, 2, 2, 2)  # первая кнопка на всю ширину, остальные по 2
+    builder.adjust(1, 2, 2, 2)
     return builder.as_markup()
 
 def mindfulness_menu_keyboard():
@@ -578,13 +438,13 @@ async def stats(message: types.Message):
     if message.from_user.id != ADMIN_ID:
         await message.answer("У тебя нет прав для этой команды.")
         return
-    conn = sqlite3.connect(DB_PATH)
+    conn = get_db_connection()
     c = conn.cursor()
     c.execute("SELECT COUNT(*) FROM users")
     total_users = c.fetchone()[0]
-    c.execute("SELECT COUNT(*) FROM users WHERE expires_at > ? AND subscription_plan != 'trial'", (int(time.time()),))
+    c.execute("SELECT COUNT(*) FROM users WHERE expires_at > %s AND subscription_plan != 'trial'", (int(time.time()),))
     active_paid = c.fetchone()[0]
-    c.execute("SELECT COUNT(*) FROM users WHERE expires_at > ? AND subscription_plan = 'trial'", (int(time.time()),))
+    c.execute("SELECT COUNT(*) FROM users WHERE expires_at > %s AND subscription_plan = 'trial'", (int(time.time()),))
     active_trials = c.fetchone()[0]
     c.execute("SELECT COUNT(*) FROM diary_entries")
     diary_entries = c.fetchone()[0]
@@ -593,7 +453,7 @@ async def stats(message: types.Message):
     c.execute("SELECT COUNT(*) FROM users WHERE reminder_enabled = 1")
     reminders_on = c.fetchone()[0]
     seven_days_ago = int(time.time()) - 7 * 86400
-    c.execute("SELECT COUNT(*) FROM users WHERE created_at >= ?", (seven_days_ago,))
+    c.execute("SELECT COUNT(*) FROM users WHERE created_at >= %s", (seven_days_ago,))
     new_users_7d = c.fetchone()[0]
     c.execute("SELECT COUNT(*) FROM payments WHERE status = 'paid'")
     paid_count = c.fetchone()[0]
@@ -609,15 +469,13 @@ async def stats(message: types.Message):
            f"⏰ Включены напоминания: {reminders_on}"
     await message.answer(text)
 
-# Команды ручной выдачи подписки
+# Ручная выдача подписки
 @dp.message(Command("grant_week"))
 async def grant_week(message: types.Message):
     await grant_subscription(message, 7, "week")
-
 @dp.message(Command("grant_month"))
 async def grant_month(message: types.Message):
     await grant_subscription(message, 30, "month")
-
 @dp.message(Command("grant_year"))
 async def grant_year(message: types.Message):
     await grant_subscription(message, 365, "year")
@@ -636,10 +494,9 @@ async def grant_subscription(message: types.Message, duration_days: int, plan: s
 @dp.callback_query(F.data == "school_modules")
 async def show_school_modules(callback: types.CallbackQuery):
     user_id = callback.from_user.id
-    # Получаем завершённые модули
-    conn = sqlite3.connect(DB_PATH)
+    conn = get_db_connection()
     c = conn.cursor()
-    c.execute("SELECT DISTINCT module_id FROM school_progress WHERE user_id = ? AND completed = 1", (user_id,))
+    c.execute("SELECT DISTINCT module_id FROM school_progress WHERE user_id = %s AND completed = 1 AND lesson_id = 999", (user_id,))
     rows = c.fetchall()
     conn.close()
     completed = set(row[0] for row in rows)
@@ -651,23 +508,19 @@ async def show_module_lessons(callback: types.CallbackQuery, state: FSMContext):
     module_id = int(callback.data.split(":")[1])
     module = next(m for m in SCHOOL_MODULES if m["id"] == module_id)
     user_id = callback.from_user.id
-    # Проверяем, открыт ли модуль
-    conn = sqlite3.connect(DB_PATH)
+    conn = get_db_connection()
     c = conn.cursor()
-    c.execute("SELECT DISTINCT module_id FROM school_progress WHERE user_id = ? AND completed = 1", (user_id,))
+    c.execute("SELECT DISTINCT module_id FROM school_progress WHERE user_id = %s AND completed = 1 AND lesson_id = 999", (user_id,))
     rows = c.fetchall()
     conn.close()
     completed = set(row[0] for row in rows)
     if not is_module_unlocked(module_id, completed):
         await callback.answer("Этот модуль ещё не открыт. Пройди предыдущие.", show_alert=True)
         return
-    # Сохраняем выбранный модуль в состоянии
     await state.update_data(current_module_id=module_id, current_lesson=0)
     lesson = module["lessons"][0]
-    await callback.message.edit_text(
-        f"📖 Модуль {module_id}: {module['title']}\n\n{lesson}\n\nНажми «Далее» для продолжения.",
-        reply_markup=InlineKeyboardBuilder().button(text="Далее ➡️", callback_data="next_lesson").as_markup()
-    )
+    await callback.message.edit_text(f"📖 Модуль {module_id}: {module['title']}\n\n{lesson}\n\nНажми «Далее» для продолжения.",
+                                     reply_markup=InlineKeyboardBuilder().button(text="Далее ➡️", callback_data="next_lesson").as_markup())
     await callback.answer()
 
 @dp.callback_query(F.data == "next_lesson")
@@ -679,53 +532,33 @@ async def next_lesson(callback: types.CallbackQuery, state: FSMContext):
     if current_lesson + 1 < len(module["lessons"]):
         await state.update_data(current_lesson=current_lesson + 1)
         lesson = module["lessons"][current_lesson + 1]
-        await callback.message.edit_text(
-            f"📖 Модуль {module_id}: {module['title']}\n\n{lesson}\n\nНажми «Далее» или «Завершить» после последнего урока.",
-            reply_markup=InlineKeyboardBuilder().button(text="Далее ➡️", callback_data="next_lesson").as_markup()
-        )
+        await callback.message.edit_text(f"📖 Модуль {module_id}: {module['title']}\n\n{lesson}\n\nНажми «Далее» или «Завершить» после последнего урока.",
+                                         reply_markup=InlineKeyboardBuilder().button(text="Далее ➡️", callback_data="next_lesson").as_markup())
     else:
-        # Последний урок, показываем задание
         await show_task(callback, state, module)
     await callback.answer()
 
 async def show_task(callback, state, module):
     task_type = module["task_type"]
     if task_type == "diary":
-        await callback.message.edit_text(
-            f"🎯 Задание: {module['lessons'][-1]}\n\nПерейди в дневник и запиши эмоцию, затем возвращайся и нажми «Готово».",
-            reply_markup=InlineKeyboardBuilder()
-                .button(text="📓 Перейти к дневнику", callback_data="diary_task")
-                .button(text="✅ Готово, продолжить", callback_data="task_done")
-                .as_markup()
-        )
+        await callback.message.edit_text(f"🎯 Задание: {module['lessons'][-1]}\n\nПерейди в дневник и запиши эмоцию, затем возвращайся и нажми «Готово».",
+                                         reply_markup=InlineKeyboardBuilder().button(text="📓 Перейти к дневнику", callback_data="diary_task").button(text="✅ Готово, продолжить", callback_data="task_done").as_markup())
     elif task_type == "mindfulness":
-        await callback.message.edit_text(
-            f"🎯 Задание: {module['lessons'][-1]}\n\nПерейди в Mindfulness и выполни указанную практику, затем возвращайся и нажми «Готово».",
-            reply_markup=InlineKeyboardBuilder()
-                .button(text="🧘 Перейти к практике", callback_data=f"mindfulness_task:{module['task_practice_id']}")
-                .button(text="✅ Готово, продолжить", callback_data="task_done")
-                .as_markup()
-        )
+        await callback.message.edit_text(f"🎯 Задание: {module['lessons'][-1]}\n\nПерейди в Mindfulness и выполни указанную практику, затем возвращайся и нажми «Готово».",
+                                         reply_markup=InlineKeyboardBuilder().button(text="🧘 Перейти к практике", callback_data=f"mindfulness_task:{module['task_practice_id']}").button(text="✅ Готово, продолжить", callback_data="task_done").as_markup())
     elif task_type == "talk":
-        await callback.message.edit_text(
-            f"🎯 Задание: {module['lessons'][-1]}\n\nПерейди в «Поговорим» и обсуди тему, затем возвращайся и нажми «Готово».",
-            reply_markup=InlineKeyboardBuilder()
-                .button(text="💬 Перейти к разговору", callback_data="talk_task")
-                .button(text="✅ Готово, продолжить", callback_data="task_done")
-                .as_markup()
-        )
+        await callback.message.edit_text(f"🎯 Задание: {module['lessons'][-1]}\n\nПерейди в «Поговорим» и обсуди тему, затем возвращайся и нажми «Готово».",
+                                         reply_markup=InlineKeyboardBuilder().button(text="💬 Перейти к разговору", callback_data="talk_task").button(text="✅ Готово, продолжить", callback_data="task_done").as_markup())
     await callback.answer()
 
 @dp.callback_query(F.data == "diary_task")
 async def go_to_diary_from_school(callback: types.CallbackQuery, state: FSMContext):
-    # Просто перенаправляем в дневник
     await callback.message.answer("Открой дневник и запиши эмоцию. После возвращайся и нажми «Готово».")
     await diary_start(callback, state)
 
 @dp.callback_query(F.data.startswith("mindfulness_task:"))
 async def go_to_mindfulness_from_school(callback: types.CallbackQuery, state: FSMContext):
     practice_id = int(callback.data.split(":")[1])
-    # Запускаем конкретную практику
     await mindfulness_today(callback, state, specific_practice_id=practice_id)
 
 @dp.callback_query(F.data == "talk_task")
@@ -737,16 +570,14 @@ async def complete_module(callback: types.CallbackQuery, state: FSMContext):
     data = await state.get_data()
     module_id = data.get("current_module_id")
     user_id = callback.from_user.id
-    # Проверяем, действительно ли выполнено задание? Пока просто доверяем кнопке
-    conn = sqlite3.connect(DB_PATH)
+    conn = get_db_connection()
     c = conn.cursor()
-    # Отмечаем все уроки модуля как завершённые (или только модуль)
-    for lesson_id in range(len(SCHOOL_MODULES[module_id-1]["lessons"])):
-        c.execute("INSERT OR REPLACE INTO school_progress (user_id, module_id, lesson_id, completed) VALUES (?, ?, ?, 1)",
+    module = next(m for m in SCHOOL_MODULES if m["id"] == module_id)
+    for lesson_id in range(len(module["lessons"])):
+        c.execute("INSERT INTO school_progress (user_id, module_id, lesson_id, completed) VALUES (%s,%s,%s,1) ON CONFLICT (user_id, module_id, lesson_id) DO UPDATE SET completed=1",
                   (user_id, module_id, lesson_id))
-    # Отмечаем модуль завершённым
-    c.execute("INSERT OR REPLACE INTO school_progress (user_id, module_id, lesson_id, completed) VALUES (?, ?, ?, 1)",
-              (user_id, module_id, 999))  # 999 - маркер завершения модуля
+    c.execute("INSERT INTO school_progress (user_id, module_id, lesson_id, completed) VALUES (%s,%s,999,1) ON CONFLICT (user_id, module_id, lesson_id) DO UPDATE SET completed=1",
+              (user_id, module_id))
     conn.commit()
     conn.close()
     await callback.message.answer(f"🎉 Поздравляю! Модуль {module_id} завершён!")
@@ -814,25 +645,21 @@ async def process_reason(message: types.Message, state: FSMContext):
     reason = message.text.strip()
     data = await state.get_data()
     user_id = message.from_user.id
-    today = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+    today = datetime.now()
     emotion_group = data.get("emotion_group", "")
     emotion = data.get("emotion", "")
     intensity = data.get("intensity", 0)
-    conn = sqlite3.connect(DB_PATH)
+    conn = get_db_connection()
     c = conn.cursor()
-    c.execute("INSERT INTO diary_entries (user_id, date, emotion, emotion_group, intensity, reason) VALUES (?, ?, ?, ?, ?, ?)",
+    c.execute("INSERT INTO diary_entries (user_id, date, emotion, emotion_group, intensity, reason) VALUES (%s,%s,%s,%s,%s,%s)",
               (user_id, today, emotion, emotion_group, intensity, reason))
     conn.commit()
     conn.close()
     await message.answer(f"✅ Запись сохранена!\n\nЭмоция: {emotion}\nИнтенсивность: {intensity}/10\nПричина: {reason}\n\nЧто хочешь сделать дальше?",
-                         reply_markup=InlineKeyboardBuilder()
-                             .button(text="💬 Разобрать в Поговорим", callback_data="start_training")
-                             .button(text="🧘 Выполнить практику", callback_data="mindfulness_today")
-                             .button(text="⬅ В меню", callback_data="main_menu")
-                             .as_markup())
+                         reply_markup=InlineKeyboardBuilder().button(text="💬 Разобрать в Поговорим", callback_data="start_training").button(text="🧘 Выполнить практику", callback_data="mindfulness_today").button(text="⬅ В меню", callback_data="main_menu").as_markup())
     await state.clear()
 
-# Mindfulness (включая конкретную практику из школы)
+# Mindfulness
 @dp.callback_query(F.data == "mindfulness_menu")
 async def mindfulness_menu(callback: types.CallbackQuery):
     if not await ensure_subscription(callback):
@@ -846,19 +673,7 @@ async def mindfulness_about(callback: types.CallbackQuery):
     if not await ensure_subscription(callback):
         await callback.answer()
         return
-    await callback.message.answer(
-        "📖 Что такое Mindfulness (осознанность)?\n\n"
-        "Осознанность — это умение быть здесь и сейчас, без осуждения и оценок.\n\n"
-        "Зачем это нужно?\n"
-        "• Снижает стресс и тревогу.\n"
-        "• Улучшает концентрацию и память.\n"
-        "• Помогает лучше понимать свои эмоции и реакции.\n\n"
-        "Как практиковать?\n"
-        "1. Нажми '🌿 Выполнить практику'.\n"
-        "2. Ты получишь короткое упражнение.\n"
-        "3. Выполни его в удобном темпе.\n"
-        "4. Поделись своими ощущениями."
-    )
+    await callback.message.answer("📖 Что такое Mindfulness (осознанность)?\n\nОсознанность — это умение быть здесь и сейчас, без осуждения и оценок.\n\nЗачем это нужно?\n• Снижает стресс и тревогу.\n• Улучшает концентрацию и память.\n• Помогает лучше понимать свои эмоции и реакции.\n\nКак практиковать?\n1. Нажми '🌿 Выполнить практику'.\n2. Ты получишь короткое упражнение.\n3. Выполни его в удобном темпе.\n4. Поделись своими ощущениями.")
     await callback.answer()
 
 @dp.callback_query(F.data == "mindfulness_today")
@@ -866,11 +681,12 @@ async def mindfulness_today(callback: types.CallbackQuery, state: FSMContext, sp
     if not await ensure_subscription(callback):
         await callback.answer()
         return
+    practice_list = MINDFULNESS_PRACTICES
     if specific_practice_id is not None:
-        practice = MINDFULNESS_PRACTICES[specific_practice_id]
+        practice = practice_list[specific_practice_id]
     else:
-        practice = random.choice(MINDFULNESS_PRACTICES)
-    practice_id = MINDFULNESS_PRACTICES.index(practice)
+        practice = random.choice(practice_list)
+    practice_id = practice_list.index(practice)
     await state.update_data(practice_id=practice_id)
     user_id = callback.from_user.id
     gender = get_user_gender(user_id)
@@ -900,9 +716,9 @@ async def mindfulness_feedback(message: types.Message, state: FSMContext):
     practice_id = data.get('practice_id', 0)
     user_id = message.from_user.id
     today = datetime.now().strftime("%Y-%m-%d")
-    conn = sqlite3.connect(DB_PATH)
+    conn = get_db_connection()
     c = conn.cursor()
-    c.execute("INSERT INTO mindfulness_log (user_id, date, practice_id, feedback) VALUES (?, ?, ?, ?)",
+    c.execute("INSERT INTO mindfulness_log (user_id, date, practice_id, feedback) VALUES (%s,%s,%s,%s)",
               (user_id, today, practice_id, feedback))
     conn.commit()
     conn.close()
@@ -1013,9 +829,7 @@ async def process_subscription(callback: types.CallbackQuery):
         if error_text:
             await callback.message.answer(f"ℹ️ {error_text}")
     else:
-        await callback.message.answer(
-            f"💳 Для оплаты перейди по ссылке:\n\n{pay_url}\n\nПосле оплаты подписка активируется автоматически."
-        )
+        await callback.message.answer(f"💳 Для оплаты перейди по ссылке:\n\n{pay_url}\n\nПосле оплаты подписка активируется автоматически.")
     await callback.answer()
 
 # Прогресс
@@ -1025,23 +839,19 @@ async def my_progress(callback: types.CallbackQuery):
         await callback.answer()
         return
     user_id = callback.from_user.id
-    conn = sqlite3.connect(DB_PATH)
+    conn = get_db_connection()
     c = conn.cursor()
-    c.execute("SELECT COUNT(*) FROM diary_entries WHERE user_id = ?", (user_id,))
+    c.execute("SELECT COUNT(*) FROM diary_entries WHERE user_id = %s", (user_id,))
     diary_count = c.fetchone()[0]
-    c.execute("SELECT COUNT(*) FROM mindfulness_log WHERE user_id = ?", (user_id,))
+    c.execute("SELECT COUNT(*) FROM mindfulness_log WHERE user_id = %s", (user_id,))
     mindfulness_count = c.fetchone()[0]
-    c.execute("SELECT COUNT(*) FROM school_progress WHERE user_id = ? AND lesson_id = 999", (user_id,))
+    c.execute("SELECT COUNT(*) FROM school_progress WHERE user_id = %s AND lesson_id = 999", (user_id,))
     modules_completed = c.fetchone()[0]
     total_modules = len(SCHOOL_MODULES)
     active, plan, expires, days_left = check_subscription(user_id)
     sub_info = f"💎 Подписка: {plan} (осталось {days_left} дн.)" if active else "💎 Подписка: неактивна"
     conn.close()
-    text = f"📊 Твой прогресс\n\n" \
-           f"📓 Записей в дневнике: {diary_count}\n" \
-           f"🧘 Выполнено практик: {mindfulness_count}\n" \
-           f"🎓 Школа эмоций: пройдено модулей {modules_completed} из {total_modules}\n" \
-           f"{sub_info}"
+    text = f"📊 Твой прогресс\n\n📓 Записей в дневнике: {diary_count}\n🧘 Выполнено практик: {mindfulness_count}\n🎓 Школа эмоций: пройдено модулей {modules_completed} из {total_modules}\n{sub_info}"
     await callback.message.answer(text)
     await callback.answer()
 
@@ -1094,18 +904,18 @@ def webhook():
 @app.route('/send_reminders', methods=['GET'])
 def send_daily_reminders():
     try:
-        conn = sqlite3.connect(DB_PATH)
+        conn = get_db_connection()
         c = conn.cursor()
         today = datetime.now().strftime("%Y-%m-%d")
         now_timestamp = int(time.time())
         current_time = datetime.now().strftime("%H:%M")
         c.execute("""
             SELECT user_id FROM users
-            WHERE expires_at > ?
-            AND reminder_time = ?
+            WHERE expires_at > %s
+            AND reminder_time = %s
             AND reminder_enabled = 1
             AND user_id NOT IN (
-                SELECT user_id FROM mindfulness_log WHERE date = ?
+                SELECT user_id FROM mindfulness_log WHERE date = %s
             )
         """, (now_timestamp, current_time, today))
         users = c.fetchall()
@@ -1118,9 +928,7 @@ def send_daily_reminders():
                 get_event_loop().run_until_complete(
                     bot.send_message(
                         user_id,
-                        "🧘 Напоминание о практике осознанности!\n\n"
-                        "Пришло время твоей ежедневной mindfulness-практики. Нажми кнопку '🧘 Mindfulness' в меню, чтобы начать.\n"
-                        "Всего несколько минут — и ты почувствуешь себя спокойнее.",
+                        "🧘 Напоминание о практике осознанности!\n\nПришло время твоей ежедневной mindfulness-практики. Нажми кнопку '🧘 Mindfulness' в меню, чтобы начать.\nВсего несколько минут — и ты почувствуешь себя спокойнее.",
                         reply_markup=main_menu_keyboard()
                     )
                 )
