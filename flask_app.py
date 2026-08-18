@@ -179,10 +179,12 @@ def create_tbank_payment(amount, description, user_id):
             return data["PaymentURL"], data["PaymentId"], None
         else:
             error_text = f"Т-Банк: {data.get('ErrorCode', '')} {data.get('Message', '')} {data.get('Details', '')}"
+            error_text += f"\n\nОтправленный JSON: {payload}"
             print(f"❌ Т-Банк ответил: {data}")
             return None, None, error_text
     except Exception as e:
         error_text = f"Ошибка запроса: {e}"
+        error_text += f"\n\nОтправленный JSON: {payload}"
         print(f"❌ Ошибка Т-Банка: {e}")
         return None, None, error_text
 
@@ -404,7 +406,7 @@ async def diary_get_reason(message: types.Message, state: FSMContext):
     await message.answer("Главное меню:", reply_markup=main_menu_keyboard())
 
 # =======================================================
-# ПРАКТИКА ОСОЗНАННОСТИ + АУДИО С ОШИБКАМИ
+# ПРАКТИКА ОСОЗНАННОСТИ + АУДИО
 # =======================================================
 @dp.callback_query(lambda c: c.data == "mindfulness_menu")
 async def mindfulness_menu(callback: types.CallbackQuery):
