@@ -130,6 +130,22 @@ def create_tbank_payment(amount, description, user_id):
     token = hashlib.sha256(token_str.encode('utf-8')).hexdigest()
     payload["Token"] = token
 
+    # Добавляем Receipt (кассовый чек) после генерации токена.
+    # Внимание: параметры Taxation и Tax могут отличаться.
+    # Если у вас другая система налогообложения, измените значения ниже.
+    payload["Receipt"] = {
+        "Taxation": "usn_income",
+        "Items": [
+            {
+                "Name": description,
+                "Price": amount_kop,
+                "Quantity": 1,
+                "Amount": amount_kop,
+                "Tax": "none"
+            }
+        ]
+    }
+
     try:
         response = requests.post(url, json=payload, timeout=10, verify=False)
         response.raise_for_status()
