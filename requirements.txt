@@ -5,4 +5,3 @@ gunicorn==23.0.0
 openai==1.55.0
 pydantic==2.9.2
 requests==2.32.3
-psycopg2-binary==2.9.9
