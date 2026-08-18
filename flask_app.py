@@ -42,18 +42,24 @@ DB_PATH = 'yaslyshu.db'
 def init_db():
     conn = sqlite3.connect(DB_PATH)
     c = conn.cursor()
+    # Создаём таблицу пользователей с расширенными полями
     c.execute('''CREATE TABLE IF NOT EXISTS users
                  (user_id INTEGER PRIMARY KEY, 
                   subscription_plan TEXT, 
                   expires_at INTEGER,
                   reminder_time TEXT DEFAULT '09:30',
                   reminder_enabled INTEGER DEFAULT 1,
-                  trial_used INTEGER DEFAULT 0)''')
-    # Добавляем колонку trial_used, если её нет (для существующих БД)
-    try:
-        c.execute("ALTER TABLE users ADD COLUMN trial_used INTEGER DEFAULT 0")
-    except sqlite3.OperationalError:
-        pass  # колонка уже есть
+                  trial_used INTEGER DEFAULT 0,
+                  name TEXT,
+                  age INTEGER,
+                  gender TEXT,
+                  created_at INTEGER)''')
+    # Добавляем недостающие колонки для совместимости
+    for col in ["trial_used", "name", "age", "gender", "created_at"]:
+        try:
+            c.execute(f"ALTER TABLE users ADD COLUMN {col} INTEGER DEFAULT 0" if col == "trial_used" else f"ALTER TABLE users ADD COLUMN {col} TEXT")
+        except sqlite3.OperationalError:
+            pass  # колонка уже есть
     c.execute('''CREATE TABLE IF NOT EXISTS diary_entries
                  (user_id INTEGER, date TEXT, emotion TEXT, reason TEXT)''')
     c.execute('''CREATE TABLE IF NOT EXISTS mindfulness_log
@@ -87,6 +93,11 @@ class MindfulnessStates(StatesGroup):
 class ReminderStates(StatesGroup):
     waiting_for_time = State()
 
+class ProfileStates(StatesGroup):
+    waiting_for_name = State()
+    waiting_for_age = State()
+    waiting_for_gender = State()
+
 # =======================================================
 # УТИЛИТЫ
 # =======================================================
@@ -104,6 +115,16 @@ def call_deepseek(prompt: str) -> str:
     except Exception as e:
         print(f"❌ DeepSeek error: {e}")
         return "Извините, сейчас сервис временно недоступен. Попробуйте позже."
+
+def ensure_user(user_id):
+    """Создаёт запись пользователя, если её ещё нет."""
+    conn = sqlite3.connect(DB_PATH)
+    c = conn.cursor()
+    c.execute("SELECT user_id FROM users WHERE user_id = ?", (user_id,))
+    if c.fetchone() is None:
+        c.execute("INSERT OR IGNORE INTO users (user_id, created_at) VALUES (?, ?)", (user_id, int(time.time())))
+    conn.commit()
+    conn.close()
 
 def create_tbank_payment(amount, description, user_id):
     # Выбираем URL в зависимости от тестового ключа
@@ -177,40 +198,31 @@ def get_user_subscription(user_id):
     return row if row else (None, 0)
 
 def update_subscription(user_id, plan, duration_days):
+    ensure_user(user_id)
     conn = sqlite3.connect(DB_PATH)
     c = conn.cursor()
     expires_at = int(time.time()) + duration_days * 86400
-    c.execute("INSERT OR REPLACE INTO users (user_id, subscription_plan, expires_at, reminder_time, reminder_enabled) VALUES (?, ?, ?, '09:30', 1)",
-              (user_id, plan, expires_at))
+    c.execute("UPDATE users SET subscription_plan = ?, expires_at = ? WHERE user_id = ?",
+              (plan, expires_at, user_id))
     conn.commit()
     conn.close()
 
 def give_trial(user_id):
     """Выдаёт пробный период, если он ещё не использован."""
+    ensure_user(user_id)
     conn = sqlite3.connect(DB_PATH)
     c = conn.cursor()
     c.execute("SELECT trial_used FROM users WHERE user_id = ?", (user_id,))
     row = c.fetchone()
-    if row is None:
-        # Пользователя ещё нет в базе
-        expires_at = int(time.time()) + 1 * 86400
-        c.execute("INSERT OR REPLACE INTO users (user_id, subscription_plan, expires_at, reminder_time, reminder_enabled, trial_used) VALUES (?, 'trial', ?, '09:30', 1, 1)",
-                  (user_id, expires_at))
-        conn.commit()
-        conn.close()
-        return True
-    elif row[0] == 0:
-        # Триал не использован
-        expires_at = int(time.time()) + 1 * 86400
-        c.execute("UPDATE users SET subscription_plan='trial', expires_at=?, trial_used=1 WHERE user_id = ?",
-                  (expires_at, user_id))
-        conn.commit()
-        conn.close()
-        return True
-    else:
-        # Триал уже был использован
+    if row and row[0] == 1:
         conn.close()
         return False
+    expires_at = int(time.time()) + 1 * 86400
+    c.execute("UPDATE users SET subscription_plan='trial', expires_at=?, trial_used=1 WHERE user_id = ?",
+              (expires_at, user_id))
+    conn.commit()
+    conn.close()
+    return True
 
 def check_subscription(user_id):
     plan, expires_at = get_user_subscription(user_id)
@@ -228,7 +240,6 @@ async def ensure_subscription(callback: types.CallbackQuery):
     active, plan, expires, days_left = check_subscription(user_id)
     if active:
         return True
-    # Если нет активной подписки, пробуем выдать trial
     if give_trial(user_id):
         await callback.message.answer("✅ Тебе активирован пробный доступ на 24 часа. Теперь ты можешь пользоваться всеми функциями бота!")
         return True
@@ -290,6 +301,14 @@ def subscription_keyboard():
     builder.adjust(1)
     return builder.as_markup()
 
+def gender_keyboard():
+    builder = InlineKeyboardBuilder()
+    builder.button(text="Женский", callback_data="gender_female")
+    builder.button(text="Мужской", callback_data="gender_male")
+    builder.button(text="Пропустить", callback_data="skip_gender")
+    builder.adjust(2)
+    return builder.as_markup()
+
 # =======================================================
 # ОБРАБОТЧИКИ
 # =======================================================
@@ -297,16 +316,128 @@ def subscription_keyboard():
 async def start(message: types.Message, state: FSMContext):
     await state.clear()
     user_id = message.from_user.id
+    ensure_user(user_id)
     if user_id == ADMIN_ID:
         await message.answer("👋 Привет, Маргарита! Ты администратор, тебе доступны все функции без ограничений.")
         await message.answer("Главное меню:", reply_markup=main_menu_keyboard())
         return
+    # Проверяем, заполнен ли профиль
+    conn = sqlite3.connect(DB_PATH)
+    c = conn.cursor()
+    c.execute("SELECT name FROM users WHERE user_id = ?", (user_id,))
+    name = c.fetchone()
+    conn.close()
+    if name and name[0]:
+        active, plan, expires, days_left = check_subscription(user_id)
+        if active:
+            text = f"👋 Привет! Ты уже с нами.\nТвой тариф: {plan}\nОсталось дней: {days_left}"
+        else:
+            text = "👋 Привет! Я — «я слышу». Твой персональный наставник по эмоциональному интеллекту и осознанности.\n\n📓 Веди дневник эмоций.\n🧘 Каждый день выполняй mindfulness-практику.\n📊 Отслеживай свой прогресс.\n\nНачни бесплатный пробный период прямо сейчас — нажми любую кнопку."
+        await message.answer(text, reply_markup=main_menu_keyboard())
+    else:
+        # Спрашиваем имя
+        await message.answer("🌸 Привет! Я — «я слышу». Давай познакомимся, чтобы я могла обращаться к тебе по имени.\n\nНапиши, как тебя зовут:")
+        await state.set_state(ProfileStates.waiting_for_name)
+
+@dp.message(ProfileStates.waiting_for_name)
+async def process_name(message: types.Message, state: FSMContext):
+    name = message.text.strip()
+    await state.update_data(name=name)
+    await message.answer("Отлично! Сколько тебе лет?")
+    await state.set_state(ProfileStates.waiting_for_age)
+
+@dp.message(ProfileStates.waiting_for_age)
+async def process_age(message: types.Message, state: FSMContext):
+    age_text = message.text.strip()
+    if not age_text.isdigit():
+        await message.answer("Пожалуйста, введи возраст цифрой.")
+        return
+    age = int(age_text)
+    await state.update_data(age=age)
+    await message.answer("И последнее: укажи свой пол, чтобы я могла обращаться к тебе правильно.", reply_markup=gender_keyboard())
+    await state.set_state(ProfileStates.waiting_for_gender)
+
+@dp.callback_query(ProfileStates.waiting_for_gender, F.data.startswith("gender_"))
+async def process_gender(callback: types.CallbackQuery, state: FSMContext):
+    gender = callback.data.split("_")[1]
+    data = await state.get_data()
+    user_id = callback.from_user.id
+    name = data.get("name", "")
+    age = data.get("age", 0)
+    # Сохраняем в базу
+    conn = sqlite3.connect(DB_PATH)
+    c = conn.cursor()
+    c.execute("UPDATE users SET name = ?, age = ?, gender = ? WHERE user_id = ?",
+              (name, age, gender, user_id))
+    conn.commit()
+    conn.close()
+    await state.clear()
+    await callback.message.answer(f"🌿 Спасибо, {name}! Теперь я буду знать, как к тебе обращаться.")
+    # Показываем меню
     active, plan, expires, days_left = check_subscription(user_id)
     if active:
-        text = f"👋 Привет! Ты уже с нами.\nТвой тариф: {plan}\nОсталось дней: {days_left}"
+        text = f"👋 Ты уже с нами.\nТвой тариф: {plan}\nОсталось дней: {days_left}"
     else:
-        text = "👋 Привет! Я — «я слышу». Твой персональный наставник по эмоциональному интеллекту и осознанности.\n\n📓 Веди дневник эмоций.\n🧘 Каждый день выполняй mindfulness-практику.\n📊 Отслеживай свой прогресс.\n\nНачни бесплатный пробный период прямо сейчас — нажми любую кнопку."
-    await message.answer(text, reply_markup=main_menu_keyboard())
+        text = "Начни бесплатный пробный период прямо сейчас — нажми любую кнопку."
+    await callback.message.answer(text, reply_markup=main_menu_keyboard())
+    await callback.answer()
+
+@dp.callback_query(ProfileStates.waiting_for_gender, F.data == "skip_gender")
+async def skip_gender(callback: types.CallbackQuery, state: FSMContext):
+    data = await state.get_data()
+    user_id = callback.from_user.id
+    name = data.get("name", "")
+    age = data.get("age", 0)
+    conn = sqlite3.connect(DB_PATH)
+    c = conn.cursor()
+    c.execute("UPDATE users SET name = ?, age = ? WHERE user_id = ?",
+              (name, age, user_id))
+    conn.commit()
+    conn.close()
+    await state.clear()
+    await callback.message.answer("Хорошо, продолжим без пола.")
+    active, plan, expires, days_left = check_subscription(user_id)
+    if active:
+        text = f"👋 Ты уже с нами.\nТвой тариф: {plan}\nОсталось дней: {days_left}"
+    else:
+        text = "Начни бесплатный пробный период прямо сейчас — нажми любую кнопку."
+    await callback.message.answer(text, reply_markup=main_menu_keyboard())
+    await callback.answer()
+
+# Команда /stats (только для админа)
+@dp.message(Command("stats"))
+async def stats(message: types.Message):
+    if message.from_user.id != ADMIN_ID:
+        await message.answer("У тебя нет прав для этой команды.")
+        return
+    conn = sqlite3.connect(DB_PATH)
+    c = conn.cursor()
+    c.execute("SELECT COUNT(*) FROM users")
+    total_users = c.fetchone()[0]
+    c.execute("SELECT COUNT(*) FROM users WHERE expires_at > ? AND subscription_plan != 'trial'", (int(time.time()),))
+    active_paid = c.fetchone()[0]
+    c.execute("SELECT COUNT(*) FROM users WHERE expires_at > ? AND subscription_plan = 'trial'", (int(time.time()),))
+    active_trials = c.fetchone()[0]
+    c.execute("SELECT COUNT(*) FROM diary_entries")
+    diary_entries = c.fetchone()[0]
+    c.execute("SELECT COUNT(*) FROM mindfulness_log")
+    mindfulness_logs = c.fetchone()[0]
+    c.execute("SELECT COUNT(*) FROM users WHERE reminder_enabled = 1")
+    reminders_on = c.fetchone()[0]
+    seven_days_ago = int(time.time()) - 7 * 86400
+    c.execute("SELECT COUNT(*) FROM users WHERE created_at >= ?", (seven_days_ago,))
+    new_users_7d = c.fetchone()[0]
+    conn.close()
+    
+    text = f"📊 Статистика бота «я слышу»\n\n" \
+           f"👥 Всего пользователей: {total_users}\n" \
+           f"🆕 Новых за 7 дней: {new_users_7d}\n" \
+           f"✅ Активные подписки: {active_paid}\n" \
+           f"🕐 Активные триалы: {active_trials}\n" \
+           f"📓 Записей в дневнике: {diary_entries}\n" \
+           f"🧘 Выполнено практик: {mindfulness_logs}\n" \
+           f"⏰ Включены напоминания: {reminders_on}"
+    await message.answer(text)
 
 @dp.callback_query(lambda c: c.data == "start_training")
 async def start_training(callback: types.CallbackQuery, state: FSMContext):
@@ -727,4 +858,4 @@ def send_daily_reminders():
         return "Error", 500
 
 if __name__ == "__main__":
-    app.run(host="0.0.0.0", port=10000) 
+    app.run(host="0.0.0.0", port=10000)
