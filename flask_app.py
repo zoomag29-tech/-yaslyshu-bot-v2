@@ -12,8 +12,6 @@ from aiogram.types import Update
 from openai import OpenAI
 import httpx
 import hashlib
-from pydub import AudioSegment
-from io import BytesIO
 
 # =======================================================
 # КОНФИГУРАЦИЯ (секреты из переменных окружения)
@@ -25,9 +23,6 @@ CONTACT = "@MARGOKARDATOVA"
 
 TERMINAL_KEY = os.environ.get("TERMINAL_KEY")
 TERMINAL_PASSWORD = os.environ.get("TERMINAL_PASSWORD")
-
-YANDEX_API_KEY = os.environ.get("YANDEX_API_KEY")
-YANDEX_FOLDER_ID = os.environ.get("YANDEX_FOLDER_ID")
 
 if not BOT_TOKEN or not DEEPSEEK_API_KEY or not TERMINAL_KEY or not TERMINAL_PASSWORD:
     raise RuntimeError("Не заданы обязательные переменные окружения: BOT_TOKEN, DEEPSEEK_API_KEY, TERMINAL_KEY, TERMINAL_PASSWORD")
@@ -103,55 +98,6 @@ def call_deepseek(prompt: str) -> str:
         print(f"❌ DeepSeek error: {e}")
         return "Извините, сейчас сервис временно недоступен. Попробуйте позже."
 
-def synthesize_speech(text: str, voice: str = "alena", speed: float = 0.9) -> BytesIO:
-    """Синтез речи через Яндекс SpeechKit. Возвращает BytesIO с аудио в mp3."""
-    if not YANDEX_API_KEY or not YANDEX_FOLDER_ID:
-        raise RuntimeError("Не заданы YANDEX_API_KEY или YANDEX_FOLDER_ID")
-    url = "https://tts.api.cloud.yandex.net/speech/v1/tts:synthesize"
-    headers = {
-        "Authorization": f"Api-Key {YANDEX_API_KEY}",
-        "Content-Type": "application/x-www-form-urlencoded"
-    }
-    data = {
-        "text": text,
-        "voice": voice,
-        "emotion": "good",
-        "speed": str(speed),
-        "format": "mp3",
-        "folderId": YANDEX_FOLDER_ID
-    }
-    response = requests.post(url, headers=headers, data=data, timeout=30)
-    if response.status_code != 200:
-        raise Exception(f"SpeechKit error: {response.status_code} {response.text}")
-    return BytesIO(response.content)
-
-def mix_audio(speech: BytesIO, music_path: str = "background_music.mp3", music_volume: int = -20) -> BytesIO:
-    """Наложение фоновой музыки на речь. music_volume - громкость музыки в dB (отрицательное значение уменьшает громкость)."""
-    speech_audio = AudioSegment.from_file(speech, format="mp3")
-    if os.path.exists(music_path):
-        music_audio = AudioSegment.from_file(music_path)
-        # Обрезаем или зацикливаем музыку до длины речи
-        if len(music_audio) < len(speech_audio):
-            loops = len(speech_audio) // len(music_audio) + 1
-            music_audio = (music_audio * loops)[:len(speech_audio)]
-        else:
-            music_audio = music_audio[:len(speech_audio)]
-        # Уменьшаем громкость музыки
-        music_audio = music_audio + music_volume
-        # Смешиваем
-        mixed = speech_audio.overlay(music_audio)
-    else:
-        mixed = speech_audio
-    output = BytesIO()
-    mixed.export(output, format="mp3")
-    output.seek(0)
-    return output
-
-async def send_voice_practice(chat_id: int, speech_bytes: BytesIO):
-    """Отправка голосового сообщения в Telegram."""
-    speech_bytes.seek(0)
-    await bot.send_voice(chat_id, voice=speech_bytes)
-
 def create_tbank_payment(amount, description, user_id):
     # Выбираем URL в зависимости от тестового ключа
     if "DEMO" in TERMINAL_KEY:
@@ -185,13 +131,10 @@ def create_tbank_payment(amount, description, user_id):
         else:
             error_text = f"Т-Банк: {data.get('ErrorCode', '')} {data.get('Message', '')} {data.get('Details', '')}"
             error_text += f"\n\nОтправленный JSON: {payload}"
-            error_text += f"\n\nURL: {url}"
             print(f"❌ Т-Банк ответил: {data}")
             return None, None, error_text
     except Exception as e:
         error_text = f"Ошибка запроса: {e}"
-        error_text += f"\n\nОтправленный JSON: {payload}"
-        error_text += f"\n\nURL: {url}"
         print(f"❌ Ошибка Т-Банка: {e}")
         return None, None, error_text
 
@@ -413,7 +356,7 @@ async def diary_get_reason(message: types.Message, state: FSMContext):
     await message.answer("Главное меню:", reply_markup=main_menu_keyboard())
 
 # =======================================================
-# ПРАКТИКА ОСОЗНАННОСТИ + АУДИО
+# ПРАКТИКА ОСОЗНАННОСТИ (ТЕКСТ)
 # =======================================================
 @dp.callback_query(lambda c: c.data == "mindfulness_menu")
 async def mindfulness_menu(callback: types.CallbackQuery):
@@ -437,11 +380,9 @@ async def mindfulness_about(callback: types.CallbackQuery):
         "• Учит возвращаться в момент, когда ум убегает в прошлое или будущее.\n\n"
         "Как практиковать?\n"
         "1. Нажми '🌿 Выполнить практику'.\n"
-        "2. Ты получишь короткое упражнение — в аудиоформате.\n"
+        "2. Ты получишь короткое упражнение в текстовом виде.\n"
         "3. Выполни его в удобном темпе.\n"
         "4. Поделись своими ощущениями — это закрепит практику.\n\n"
-        "🎧 Аудио-практики\n"
-        "Мы записали каждую практику с приятным, мягким голосом и лёгкой фоновой музыкой. Ты можешь просто нажать play, закрыть глаза и следовать за голосом. Это особенно удобно, когда нужно расслабиться и не хочется читать текст.\n\n"
         "Регулярная практика (всего 2–5 минут в день) меняет качество жизни. Попробуй!"
     )
     await callback.answer()
@@ -466,25 +407,7 @@ async def mindfulness_today(callback: types.CallbackQuery, state: FSMContext):
 """
     await callback.message.answer("🧘 Готовлю для тебя практику... Дай мне секунду.")
     answer = call_deepseek(prompt)
-
-    audio_sent = False
-    error_message = ""
-    try:
-        if YANDEX_API_KEY and YANDEX_FOLDER_ID:
-            speech_bytes = synthesize_speech(answer, voice="alena", speed=0.9)
-            mixed_bytes = mix_audio(speech_bytes, music_path="background_music.mp3", music_volume=-20)
-            await send_voice_practice(callback.from_user.id, mixed_bytes)
-            audio_sent = True
-        else:
-            error_message = "Нет ключей Яндекс"
-    except Exception as e:
-        error_message = str(e)
-
-    if not audio_sent:
-        await callback.message.answer(answer)
-        if error_message:
-            await callback.message.answer(f"⚠️ Ошибка аудио: {error_message}")
-
+    await callback.message.answer(answer)
     await callback.message.answer("Как ты себя чувствуешь после этого? (напиши коротко)")
     await state.set_state(MindfulnessStates.waiting_for_feedback)
     await callback.answer()
