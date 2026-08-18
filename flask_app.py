@@ -104,10 +104,10 @@ def create_tbank_payment(amount, description, user_id):
         url = "https://rest-api-test.tinkoff.ru/v2/Init"
     else:
         url = "https://securepay.tinkoff.ru/v2/Init"
-    
+
     amount_kop = amount * 100
     order_id = f"order_{user_id}_{int(time.time())}"
-    
+
     payload = {
         "TerminalKey": TERMINAL_KEY,
         "Amount": amount_kop,
@@ -117,16 +117,19 @@ def create_tbank_payment(amount, description, user_id):
         "SuccessURL": "https://t.me/yaslyshu_bot",
         "FailURL": "https://t.me/yaslyshu_bot"
     }
-    
-    # Генерация токена по правилам Т-Банка:
-    # 1. Сортируем ключи по алфавиту
-    # 2. Склеиваем значения без разделителей
-    # 3. Добавляем пароль в конец
-    token_str = ''.join(str(payload[k]) for k in sorted(payload.keys()))
-    token_str += TERMINAL_PASSWORD
+
+    # Генерация токена по документации:
+    # 1. К параметрам корневого объекта добавляем Password.
+    token_payload = payload.copy()
+    token_payload["Password"] = TERMINAL_PASSWORD
+    # 2. Сортируем ключи по алфавиту.
+    sorted_keys = sorted(token_payload.keys())
+    # 3. Конкатенируем значения.
+    token_str = ''.join(str(token_payload[k]) for k in sorted_keys)
+    # 4. SHA-256.
     token = hashlib.sha256(token_str.encode('utf-8')).hexdigest()
     payload["Token"] = token
-    
+
     try:
         response = requests.post(url, json=payload, timeout=10, verify=False)
         response.raise_for_status()
