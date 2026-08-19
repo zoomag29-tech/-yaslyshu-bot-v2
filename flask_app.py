@@ -42,7 +42,6 @@ DB_PATH = 'yaslyshu.db'
 def init_db():
     conn = sqlite3.connect(DB_PATH)
     c = conn.cursor()
-    # Пользователи
     c.execute('''CREATE TABLE IF NOT EXISTS users
                  (user_id INTEGER PRIMARY KEY, 
                   subscription_plan TEXT, 
@@ -62,7 +61,6 @@ def init_db():
                 c.execute("ALTER TABLE users ADD COLUMN created_at INTEGER")
         except sqlite3.OperationalError:
             pass
-    # Платежи
     c.execute('''CREATE TABLE IF NOT EXISTS payments
                  (order_id TEXT PRIMARY KEY,
                   user_id INTEGER,
@@ -71,7 +69,6 @@ def init_db():
                   amount INTEGER,
                   created_at INTEGER,
                   status TEXT DEFAULT 'pending')''')
-    # Дневник (расширенный)
     c.execute('''CREATE TABLE IF NOT EXISTS diary_entries
                  (id INTEGER PRIMARY KEY AUTOINCREMENT,
                   user_id INTEGER,
@@ -80,10 +77,8 @@ def init_db():
                   emotion_group TEXT,
                   intensity INTEGER,
                   reason TEXT)''')
-    # Практики
     c.execute('''CREATE TABLE IF NOT EXISTS mindfulness_log
                  (user_id INTEGER, date TEXT, practice_id INTEGER, feedback TEXT)''')
-    # Прогресс школы
     c.execute('''CREATE TABLE IF NOT EXISTS school_progress
                  (user_id INTEGER,
                   module_id INTEGER,
@@ -723,6 +718,7 @@ async def mindfulness_today(callback: types.CallbackQuery, state: FSMContext, sp
     prompt = f"""
 Ты — женщина-тренер по осознанности. Предложи пользователю ({gender_text}) короткую практику mindfulness.
 Обязательно обращайся от женского лица, но используй правильный род для пользователя.
+Никогда не придумывай имя для пользователя — обращайся только на «ты».
 Вот описание практики: {practice}.
 
 Дополни его:
@@ -780,7 +776,8 @@ async def process_situation(message: types.Message, state: FSMContext):
     gender = get_user_gender(user_id)
     gender_text = "мужчина" if gender == "male" else "женщина" if gender == "female" else "человек"
     prompt = f"""Ты — женщина-тренер по эмоциональному интеллекту. Пользователь ({gender_text}) описывает ситуацию: {situation}.
-Твоя задача — помочь ему разобраться в чувствах, задавая уточняющие вопросы и направляя к осознанию. Не давай готовых советов. Будь эмпатичной, без диагностики. Обращайся от женского лица, но учитывай пол пользователя.
+Твоя задача — помочь ему разобраться в чувствах, задавая уточняющие вопросы и направляя к осознанию. Не давай готовых советов. Будь эмпатичной, без диагностики.
+Обращайся от женского лица, но учитывай пол пользователя. Не используй никаких имён для пользователя, если он сам не представился — обращайся только на «ты».
 Ответь на русском, используй эмодзи.
 ВАЖНО: Не используй звёздочки (*), подчёркивания (_) или другие символы markdown. Пиши обычным текстом."""
     await message.answer("🌱 Я слушаю... Дай мне секунду.")
@@ -798,7 +795,8 @@ async def process_followup(message: types.Message, state: FSMContext):
     gender_text = "мужчина" if gender == "male" else "женщина" if gender == "female" else "человек"
     prompt = f"""Ты — женщина-тренер по эмоциональному интеллекту. Ранее пользователь ({gender_text}) описал ситуацию: {situation}.
 Затем он ответил на твой вопрос: {user_response}.
-Продолжи диалог: задай следующий вопрос или подведи к итогу. Не давай диагнозов. Обращайся от женского лица, но учитывай пол пользователя. Ответь на русском, без форматирования."""
+Продолжи диалог: задай следующий вопрос или подведи к итогу. Не давай диагнозов. Обращайся от женского лица, но учитывай пол пользователя. Не придумывай и не используй имя пользователя — только «ты».
+Ответь на русском, без форматирования."""
     await message.answer("🌱 Продолжаем...")
     answer = call_deepseek(prompt)
     await message.answer(answer)
