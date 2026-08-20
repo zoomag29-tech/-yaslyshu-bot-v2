@@ -1,4 +1,4 @@
-import random, time, asyncio, requests, re, traceback, sqlite3, os
+import random, time, asyncio, requests, re, traceback, os
 from datetime import datetime, timedelta
 from aiogram import Bot, Dispatcher, types, F
 from aiogram.filters import Command
@@ -12,6 +12,8 @@ from aiogram.types import Update
 from openai import OpenAI
 import httpx
 import hashlib
+import psycopg2
+import psycopg2.extras
 
 # =======================================================
 # КОНФИГУРАЦИЯ
@@ -24,8 +26,9 @@ CONTACT = "@MARGOKARDATOVA"
 TERMINAL_KEY = os.environ.get("TERMINAL_KEY")
 TERMINAL_PASSWORD = os.environ.get("TERMINAL_PASSWORD")
 RECEIPT_EMAIL = os.environ.get("RECEIPT_EMAIL", "no-reply@example.com")
+DATABASE_URL = os.environ.get("DATABASE_URL")
 
-if not BOT_TOKEN or not DEEPSEEK_API_KEY or not TERMINAL_KEY or not TERMINAL_PASSWORD:
+if not BOT_TOKEN or not DEEPSEEK_API_KEY or not TERMINAL_KEY or not TERMINAL_PASSWORD or not DATABASE_URL:
     raise RuntimeError("Не заданы обязательные переменные окружения")
 
 # =======================================================
@@ -35,56 +38,56 @@ http_client = httpx.Client(trust_env=False)
 client = OpenAI(api_key=DEEPSEEK_API_KEY, base_url="https://api.deepseek.com", http_client=http_client)
 
 # =======================================================
-# БАЗА ДАННЫХ (SQLite)
+# БАЗА ДАННЫХ (PostgreSQL)
 # =======================================================
-DB_PATH = 'yaslyshu.db'
+def get_db_connection():
+    return psycopg2.connect(DATABASE_URL, sslmode='require')
 
 def init_db():
-    conn = sqlite3.connect(DB_PATH)
+    conn = get_db_connection()
     c = conn.cursor()
-    c.execute('''CREATE TABLE IF NOT EXISTS users
-                 (user_id INTEGER PRIMARY KEY, 
-                  subscription_plan TEXT, 
-                  expires_at INTEGER,
-                  reminder_time TEXT DEFAULT '09:30',
-                  reminder_enabled INTEGER DEFAULT 1,
-                  trial_used INTEGER DEFAULT 0,
-                  gender TEXT,
-                  created_at INTEGER)''')
-    for col in ["trial_used", "gender", "created_at"]:
-        try:
-            if col == "trial_used":
-                c.execute("ALTER TABLE users ADD COLUMN trial_used INTEGER DEFAULT 0")
-            elif col == "gender":
-                c.execute("ALTER TABLE users ADD COLUMN gender TEXT")
-            else:
-                c.execute("ALTER TABLE users ADD COLUMN created_at INTEGER")
-        except sqlite3.OperationalError:
-            pass
-    c.execute('''CREATE TABLE IF NOT EXISTS payments
-                 (order_id TEXT PRIMARY KEY,
-                  user_id INTEGER,
-                  plan TEXT,
-                  duration_days INTEGER,
-                  amount INTEGER,
-                  created_at INTEGER,
-                  status TEXT DEFAULT 'pending')''')
-    c.execute('''CREATE TABLE IF NOT EXISTS diary_entries
-                 (id INTEGER PRIMARY KEY AUTOINCREMENT,
-                  user_id INTEGER,
-                  date TEXT,
-                  emotion TEXT,
-                  emotion_group TEXT,
-                  intensity INTEGER,
-                  reason TEXT)''')
-    c.execute('''CREATE TABLE IF NOT EXISTS mindfulness_log
-                 (user_id INTEGER, date TEXT, practice_id INTEGER, feedback TEXT)''')
-    c.execute('''CREATE TABLE IF NOT EXISTS school_progress
-                 (user_id INTEGER,
-                  module_id INTEGER,
-                  lesson_id INTEGER,
-                  completed INTEGER DEFAULT 0,
-                  PRIMARY KEY (user_id, module_id, lesson_id))''')
+    c.execute('''CREATE TABLE IF NOT EXISTS users (
+                 user_id BIGINT PRIMARY KEY,
+                 subscription_plan TEXT,
+                 expires_at BIGINT,
+                 reminder_time TEXT DEFAULT '09:30',
+                 reminder_enabled INTEGER DEFAULT 1,
+                 trial_used INTEGER DEFAULT 0,
+                 gender TEXT,
+                 created_at BIGINT
+                 )''')
+    c.execute('''CREATE TABLE IF NOT EXISTS payments (
+                 order_id TEXT PRIMARY KEY,
+                 user_id BIGINT,
+                 plan TEXT,
+                 duration_days INTEGER,
+                 amount INTEGER,
+                 created_at BIGINT,
+                 status TEXT DEFAULT 'pending'
+                 )''')
+    c.execute('''CREATE TABLE IF NOT EXISTS diary_entries (
+                 id SERIAL PRIMARY KEY,
+                 user_id BIGINT,
+                 date TIMESTAMP,
+                 emotion TEXT,
+                 emotion_group TEXT,
+                 intensity INTEGER,
+                 reason TEXT
+                 )''')
+    c.execute('''CREATE TABLE IF NOT EXISTS mindfulness_log (
+                 id SERIAL PRIMARY KEY,
+                 user_id BIGINT,
+                 date DATE,
+                 practice_id INTEGER,
+                 feedback TEXT
+                 )''')
+    c.execute('''CREATE TABLE IF NOT EXISTS school_progress (
+                 user_id BIGINT,
+                 module_id INTEGER,
+                 lesson_id INTEGER,
+                 completed INTEGER DEFAULT 0,
+                 PRIMARY KEY (user_id, module_id, lesson_id)
+                 )''')
     conn.commit()
     conn.close()
 
@@ -143,27 +146,27 @@ def call_deepseek(prompt: str) -> str:
         return "Извините, сейчас сервис временно недоступен. Попробуйте позже."
 
 def ensure_user(user_id):
-    conn = sqlite3.connect(DB_PATH)
+    conn = get_db_connection()
     c = conn.cursor()
-    c.execute("SELECT user_id FROM users WHERE user_id = ?", (user_id,))
+    c.execute("SELECT user_id FROM users WHERE user_id = %s", (user_id,))
     if c.fetchone() is None:
-        c.execute("INSERT OR IGNORE INTO users (user_id, created_at) VALUES (?, ?)", (user_id, int(time.time())))
+        c.execute("INSERT INTO users (user_id, created_at) VALUES (%s, %s)", (user_id, int(time.time())))
         conn.commit()
     conn.close()
 
 def get_user_gender(user_id):
-    conn = sqlite3.connect(DB_PATH)
+    conn = get_db_connection()
     c = conn.cursor()
-    c.execute("SELECT gender FROM users WHERE user_id = ?", (user_id,))
+    c.execute("SELECT gender FROM users WHERE user_id = %s", (user_id,))
     row = c.fetchone()
     conn.close()
     return row[0] if row and row[0] else None
 
 def set_user_gender(user_id, gender):
     ensure_user(user_id)
-    conn = sqlite3.connect(DB_PATH)
+    conn = get_db_connection()
     c = conn.cursor()
-    c.execute("UPDATE users SET gender = ? WHERE user_id = ?", (gender, user_id))
+    c.execute("UPDATE users SET gender = %s WHERE user_id = %s", (gender, user_id))
     conn.commit()
     conn.close()
 
@@ -212,58 +215,56 @@ def create_tbank_payment(amount, description, user_id, plan, duration_days):
         return None, None, error_text
 
 def save_payment(order_id, user_id, plan, duration_days, amount):
-    conn = sqlite3.connect(DB_PATH)
+    conn = get_db_connection()
     c = conn.cursor()
-    c.execute("INSERT OR REPLACE INTO payments (order_id, user_id, plan, duration_days, amount, created_at, status) VALUES (?, ?, ?, ?, ?, ?, 'pending')",
+    c.execute("INSERT INTO payments (order_id, user_id, plan, duration_days, amount, created_at, status) VALUES (%s,%s,%s,%s,%s,%s,'pending') ON CONFLICT (order_id) DO UPDATE SET status='pending'",
               (order_id, user_id, plan, duration_days, amount, int(time.time())))
     conn.commit()
     conn.close()
 
 def get_payment(order_id):
-    conn = sqlite3.connect(DB_PATH)
+    conn = get_db_connection()
     c = conn.cursor()
-    c.execute("SELECT user_id, plan, duration_days, status FROM payments WHERE order_id = ?", (order_id,))
+    c.execute("SELECT user_id, plan, duration_days, status FROM payments WHERE order_id = %s", (order_id,))
     row = c.fetchone()
     conn.close()
     return row
 
 def update_payment_status(order_id, status):
-    conn = sqlite3.connect(DB_PATH)
+    conn = get_db_connection()
     c = conn.cursor()
-    c.execute("UPDATE payments SET status = ? WHERE order_id = ?", (status, order_id))
+    c.execute("UPDATE payments SET status = %s WHERE order_id = %s", (status, order_id))
     conn.commit()
     conn.close()
 
 def get_user_subscription(user_id):
-    conn = sqlite3.connect(DB_PATH)
+    conn = get_db_connection()
     c = conn.cursor()
-    c.execute("SELECT subscription_plan, expires_at FROM users WHERE user_id = ?", (user_id,))
+    c.execute("SELECT subscription_plan, expires_at FROM users WHERE user_id = %s", (user_id,))
     row = c.fetchone()
     conn.close()
     return row if row else (None, 0)
 
 def update_subscription(user_id, plan, duration_days):
     ensure_user(user_id)
-    conn = sqlite3.connect(DB_PATH)
+    conn = get_db_connection()
     c = conn.cursor()
     expires_at = int(time.time()) + duration_days * 86400
-    c.execute("UPDATE users SET subscription_plan = ?, expires_at = ? WHERE user_id = ?",
-              (plan, expires_at, user_id))
+    c.execute("UPDATE users SET subscription_plan = %s, expires_at = %s WHERE user_id = %s", (plan, expires_at, user_id))
     conn.commit()
     conn.close()
 
 def give_trial(user_id):
     ensure_user(user_id)
-    conn = sqlite3.connect(DB_PATH)
+    conn = get_db_connection()
     c = conn.cursor()
-    c.execute("SELECT trial_used FROM users WHERE user_id = ?", (user_id,))
+    c.execute("SELECT trial_used FROM users WHERE user_id = %s", (user_id,))
     row = c.fetchone()
     if row and row[0] == 1:
         conn.close()
         return False
     expires_at = int(time.time()) + 1 * 86400
-    c.execute("UPDATE users SET subscription_plan='trial', expires_at=?, trial_used=1 WHERE user_id = ?",
-              (expires_at, user_id))
+    c.execute("UPDATE users SET subscription_plan='trial', expires_at=%s, trial_used=1 WHERE user_id = %s", (expires_at, user_id))
     conn.commit()
     conn.close()
     return True
@@ -433,13 +434,13 @@ async def stats(message: types.Message):
     if message.from_user.id != ADMIN_ID:
         await message.answer("У тебя нет прав для этой команды.")
         return
-    conn = sqlite3.connect(DB_PATH)
+    conn = get_db_connection()
     c = conn.cursor()
     c.execute("SELECT COUNT(*) FROM users")
     total_users = c.fetchone()[0]
-    c.execute("SELECT COUNT(*) FROM users WHERE expires_at > ? AND subscription_plan != 'trial'", (int(time.time()),))
+    c.execute("SELECT COUNT(*) FROM users WHERE expires_at > %s AND subscription_plan != 'trial'", (int(time.time()),))
     active_paid = c.fetchone()[0]
-    c.execute("SELECT COUNT(*) FROM users WHERE expires_at > ? AND subscription_plan = 'trial'", (int(time.time()),))
+    c.execute("SELECT COUNT(*) FROM users WHERE expires_at > %s AND subscription_plan = 'trial'", (int(time.time()),))
     active_trials = c.fetchone()[0]
     c.execute("SELECT COUNT(*) FROM diary_entries")
     diary_entries = c.fetchone()[0]
@@ -448,7 +449,7 @@ async def stats(message: types.Message):
     c.execute("SELECT COUNT(*) FROM users WHERE reminder_enabled = 1")
     reminders_on = c.fetchone()[0]
     seven_days_ago = int(time.time()) - 7 * 86400
-    c.execute("SELECT COUNT(*) FROM users WHERE created_at >= ?", (seven_days_ago,))
+    c.execute("SELECT COUNT(*) FROM users WHERE created_at >= %s", (seven_days_ago,))
     new_users_7d = c.fetchone()[0]
     c.execute("SELECT COUNT(*) FROM payments WHERE status = 'paid'")
     paid_count = c.fetchone()[0]
@@ -485,13 +486,13 @@ async def grant_subscription(message: types.Message, duration_days: int, plan: s
     end_date = datetime.fromtimestamp(int(time.time()) + duration_days * 86400).strftime("%d.%m.%Y")
     await message.answer(f"✅ Подписка «{plan}» активирована для пользователя {target_user_id} до {end_date}.")
 
-# EQ-практика (раздел)
+# EQ-практика
 @dp.callback_query(F.data == "school_modules")
 async def show_school_modules(callback: types.CallbackQuery):
     user_id = callback.from_user.id
-    conn = sqlite3.connect(DB_PATH)
+    conn = get_db_connection()
     c = conn.cursor()
-    c.execute("SELECT DISTINCT module_id FROM school_progress WHERE user_id = ? AND completed = 1 AND lesson_id = 999", (user_id,))
+    c.execute("SELECT DISTINCT module_id FROM school_progress WHERE user_id = %s AND completed = 1 AND lesson_id = 999", (user_id,))
     rows = c.fetchall()
     conn.close()
     completed = set(row[0] for row in rows)
@@ -510,9 +511,9 @@ async def show_module_lessons(callback: types.CallbackQuery, state: FSMContext):
     module_id = int(callback.data.split(":")[1])
     module = next(m for m in SCHOOL_MODULES if m["id"] == module_id)
     user_id = callback.from_user.id
-    conn = sqlite3.connect(DB_PATH)
+    conn = get_db_connection()
     c = conn.cursor()
-    c.execute("SELECT DISTINCT module_id FROM school_progress WHERE user_id = ? AND completed = 1 AND lesson_id = 999", (user_id,))
+    c.execute("SELECT DISTINCT module_id FROM school_progress WHERE user_id = %s AND completed = 1 AND lesson_id = 999", (user_id,))
     rows = c.fetchall()
     conn.close()
     completed = set(row[0] for row in rows)
@@ -572,13 +573,13 @@ async def complete_module(callback: types.CallbackQuery, state: FSMContext):
     data = await state.get_data()
     module_id = data.get("current_module_id")
     user_id = callback.from_user.id
-    conn = sqlite3.connect(DB_PATH)
+    conn = get_db_connection()
     c = conn.cursor()
     module = next(m for m in SCHOOL_MODULES if m["id"] == module_id)
     for lesson_id in range(len(module["lessons"])):
-        c.execute("INSERT OR REPLACE INTO school_progress (user_id, module_id, lesson_id, completed) VALUES (?, ?, ?, 1)",
+        c.execute("INSERT INTO school_progress (user_id, module_id, lesson_id, completed) VALUES (%s,%s,%s,1) ON CONFLICT (user_id, module_id, lesson_id) DO UPDATE SET completed=1",
                   (user_id, module_id, lesson_id))
-    c.execute("INSERT OR REPLACE INTO school_progress (user_id, module_id, lesson_id, completed) VALUES (?, ?, 999, 1)",
+    c.execute("INSERT INTO school_progress (user_id, module_id, lesson_id, completed) VALUES (%s,%s,999,1) ON CONFLICT (user_id, module_id, lesson_id) DO UPDATE SET completed=1",
               (user_id, module_id))
     conn.commit()
     conn.close()
@@ -651,9 +652,9 @@ async def process_reason(message: types.Message, state: FSMContext):
     emotion_group = data.get("emotion_group", "")
     emotion = data.get("emotion", "")
     intensity = data.get("intensity", 0)
-    conn = sqlite3.connect(DB_PATH)
+    conn = get_db_connection()
     c = conn.cursor()
-    c.execute("INSERT INTO diary_entries (user_id, date, emotion, emotion_group, intensity, reason) VALUES (?, ?, ?, ?, ?, ?)",
+    c.execute("INSERT INTO diary_entries (user_id, date, emotion, emotion_group, intensity, reason) VALUES (%s,%s,%s,%s,%s,%s)",
               (user_id, today, emotion, emotion_group, intensity, reason))
     conn.commit()
     conn.close()
@@ -748,9 +749,9 @@ async def mindfulness_feedback(message: types.Message, state: FSMContext):
     practice_id = data.get('practice_id', 0)
     user_id = message.from_user.id
     today = datetime.now().strftime("%Y-%m-%d")
-    conn = sqlite3.connect(DB_PATH)
+    conn = get_db_connection()
     c = conn.cursor()
-    c.execute("INSERT INTO mindfulness_log (user_id, date, practice_id, feedback) VALUES (?, ?, ?, ?)",
+    c.execute("INSERT INTO mindfulness_log (user_id, date, practice_id, feedback) VALUES (%s,%s,%s,%s)",
               (user_id, today, practice_id, feedback))
     conn.commit()
     conn.close()
@@ -873,13 +874,13 @@ async def my_progress(callback: types.CallbackQuery):
         await callback.answer()
         return
     user_id = callback.from_user.id
-    conn = sqlite3.connect(DB_PATH)
+    conn = get_db_connection()
     c = conn.cursor()
-    c.execute("SELECT COUNT(*) FROM diary_entries WHERE user_id = ?", (user_id,))
+    c.execute("SELECT COUNT(*) FROM diary_entries WHERE user_id = %s", (user_id,))
     diary_count = c.fetchone()[0]
-    c.execute("SELECT COUNT(*) FROM mindfulness_log WHERE user_id = ?", (user_id,))
+    c.execute("SELECT COUNT(*) FROM mindfulness_log WHERE user_id = %s", (user_id,))
     mindfulness_count = c.fetchone()[0]
-    c.execute("SELECT COUNT(*) FROM school_progress WHERE user_id = ? AND lesson_id = 999", (user_id,))
+    c.execute("SELECT COUNT(*) FROM school_progress WHERE user_id = %s AND lesson_id = 999", (user_id,))
     modules_completed = c.fetchone()[0]
     total_modules = len(SCHOOL_MODULES)
     active, plan, expires, days_left = check_subscription(user_id)
@@ -938,18 +939,18 @@ def webhook():
 @app.route('/send_reminders', methods=['GET'])
 def send_daily_reminders():
     try:
-        conn = sqlite3.connect(DB_PATH)
+        conn = get_db_connection()
         c = conn.cursor()
         today = datetime.now().strftime("%Y-%m-%d")
         now_timestamp = int(time.time())
         current_time = datetime.now().strftime("%H:%M")
         c.execute("""
             SELECT user_id FROM users
-            WHERE expires_at > ?
-            AND reminder_time = ?
+            WHERE expires_at > %s
+            AND reminder_time = %s
             AND reminder_enabled = 1
             AND user_id NOT IN (
-                SELECT user_id FROM mindfulness_log WHERE date = ?
+                SELECT user_id FROM mindfulness_log WHERE date = %s
             )
         """, (now_timestamp, current_time, today))
         users = c.fetchall()
