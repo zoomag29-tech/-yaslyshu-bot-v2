@@ -21,7 +21,8 @@ import psycopg2.extras
 BOT_TOKEN = os.environ.get("BOT_TOKEN")
 ADMIN_ID = int(os.environ.get("ADMIN_ID", "726250140"))
 DEEPSEEK_API_KEY = os.environ.get("DEEPSEEK_API_KEY")
-CONTACT = "@MARGOKARDATOVA"
+CONTACT = "yaslyshu.bot@gmail.com"
+OFFER_URL = "https://docs.google.com/document/d/189RhmunRNl2IUBqS2GSPBE_rgelWZvWqhLs013Fb-Fg/edit?usp=sharing"
 
 TERMINAL_KEY = os.environ.get("TERMINAL_KEY")
 TERMINAL_PASSWORD = os.environ.get("TERMINAL_PASSWORD")
@@ -864,8 +865,21 @@ async def process_subscription(callback: types.CallbackQuery):
         if error_text:
             await callback.message.answer(f"ℹ️ {error_text}")
     else:
-        await callback.message.answer(f"💳 Для оплаты перейди по ссылке:\n\n{pay_url}\n\nПосле оплаты подписка активируется автоматически.")
+        await callback.message.answer(
+            f"💳 Для оплаты перейди по ссылке:\n\n{pay_url}\n\n"
+            "Оплачивая подписку, вы соглашаетесь с условиями публичной оферты.\n"
+            f"Ознакомиться: <a href='{OFFER_URL}'>открыть</a> или команда /offer",
+            parse_mode="HTML"
+        )
     await callback.answer()
+
+# Команда /offer
+@dp.message(Command("offer"))
+async def offer_command(message: types.Message):
+    await message.answer(
+        f"📄 Публичная оферта: <a href='{OFFER_URL}'>открыть</a>",
+        parse_mode="HTML"
+    )
 
 # Прогресс
 @dp.callback_query(F.data == "my_progress")
@@ -893,7 +907,11 @@ async def my_progress(callback: types.CallbackQuery):
 # Поддержка
 @dp.callback_query(F.data == "support")
 async def support(callback: types.CallbackQuery):
-    await callback.message.answer("📞 Если нужна помощь, пиши в личные сообщения: @MARGOKARDATOVA")
+    await callback.message.answer(
+        f"📞 Поддержка: {CONTACT}\n"
+        f"📄 Публичная оферта: <a href='{OFFER_URL}'>открыть</a>",
+        parse_mode="HTML"
+    )
     await callback.answer()
 
 # =======================================================
