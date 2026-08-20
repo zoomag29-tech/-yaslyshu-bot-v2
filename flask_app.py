@@ -305,7 +305,7 @@ EMOTION_GROUPS = {
 }
 
 # =======================================================
-# ШКОЛА ЭМОЦИЙ
+# МОДУЛИ EQ-ПРАКТИКИ
 # =======================================================
 SCHOOL_MODULES = [
     {"id":1, "title":"Что такое эмоциональный интеллект?", "description":"Введение в EQ, базовые эмоции, знакомство с инструментами бота.", "lessons":["Эмоциональный интеллект — это способность понимать свои и чужие эмоции и управлять ими.\n\nИз чего состоит EQ:\n- Самосознание\n- Самоконтроль\n- Эмпатия\n- Навыки общения", "Базовые эмоции: радость, грусть, злость, страх, отвращение, удивление, доверие.\n\nЭти эмоции есть у всех людей, они помогают нам реагировать на мир.", "Инструменты бота:\n\n📓 Дневник эмоций — чтобы фиксировать и анализировать свои состояния.\n🧘 Mindfulness — чтобы успокаивать ум и снижать интенсивность эмоций.\n💬 Поговорим — чтобы не копить эмоции, а разбирать их в диалоге.", "Задание: выбери одну базовую эмоцию и запиши её в дневник с интенсивностью от 1 до 10."], "task_type":"diary", "task_practice_id":None},
@@ -324,7 +324,7 @@ SCHOOL_MODULES = [
 # =======================================================
 def main_menu_keyboard():
     builder = InlineKeyboardBuilder()
-    builder.button(text="🎓 EQ · Школа эмоций", callback_data="school_modules")
+    builder.button(text="🎓 EQ-практика", callback_data="school_modules")
     builder.button(text="💬 Поговорим", callback_data="start_training")
     builder.button(text="📓 Дневник эмоций", callback_data="diary")
     builder.button(text="🧘 Mindfulness", callback_data="mindfulness_menu")
@@ -485,7 +485,7 @@ async def grant_subscription(message: types.Message, duration_days: int, plan: s
     end_date = datetime.fromtimestamp(int(time.time()) + duration_days * 86400).strftime("%d.%m.%Y")
     await message.answer(f"✅ Подписка «{plan}» активирована для пользователя {target_user_id} до {end_date}.")
 
-# Школа эмоций
+# EQ-практика (раздел)
 @dp.callback_query(F.data == "school_modules")
 async def show_school_modules(callback: types.CallbackQuery):
     user_id = callback.from_user.id
@@ -495,7 +495,14 @@ async def show_school_modules(callback: types.CallbackQuery):
     rows = c.fetchall()
     conn.close()
     completed = set(row[0] for row in rows)
-    await callback.message.edit_text("🎓 EQ · Школа эмоций\n\nВыбери модуль:", reply_markup=school_modules_keyboard(completed))
+    welcome_text = (
+        "🎓 **EQ-практика**\n\n"
+        "Добро пожаловать в EQ-практику!\n"
+        "Здесь вас ждут 9 тематических блоков с теорией, упражнениями и практиками осознанности для развития эмоционального интеллекта.\n"
+        "Проходите в удобном темпе, выполняйте задания и фиксируйте изменения в дневнике эмоций.\n\n"
+        "Это информационно-консультационный контент для личного развития – без экзаменов и сертификатов."
+    )
+    await callback.message.edit_text(welcome_text, reply_markup=school_modules_keyboard(completed))
     await callback.answer()
 
 @dp.callback_query(F.data.startswith("module:"))
@@ -527,7 +534,7 @@ async def next_lesson(callback: types.CallbackQuery, state: FSMContext):
     if current_lesson + 1 < len(module["lessons"]):
         await state.update_data(current_lesson=current_lesson + 1)
         lesson = module["lessons"][current_lesson + 1]
-        await callback.message.edit_text(f"📖 Модуль {module_id}: {module['title']}\n\n{lesson}\n\nНажми «Далее» или «Завершить» после последнего урока.",
+        await callback.message.edit_text(f"📖 Модуль {module_id}: {module['title']}\n\n{lesson}\n\nНажми «Далее» или «Завершить» после последнего блока.",
                                          reply_markup=InlineKeyboardBuilder().button(text="Далее ➡️", callback_data="next_lesson").as_markup())
     else:
         await show_task(callback, state, module)
@@ -878,7 +885,7 @@ async def my_progress(callback: types.CallbackQuery):
     active, plan, expires, days_left = check_subscription(user_id)
     sub_info = f"💎 Подписка: {plan} (осталось {days_left} дн.)" if active else "💎 Подписка: неактивна"
     conn.close()
-    text = f"📊 Твой прогресс\n\n📓 Записей в дневнике: {diary_count}\n🧘 Выполнено практик: {mindfulness_count}\n🎓 Школа эмоций: пройдено модулей {modules_completed} из {total_modules}\n{sub_info}"
+    text = f"📊 Твой прогресс\n\n📓 Записей в дневнике: {diary_count}\n🧘 Выполнено практик: {mindfulness_count}\n🎓 EQ-практика: пройдено модулей {modules_completed} из {total_modules}\n{sub_info}"
     await callback.message.answer(text)
     await callback.answer()
 
